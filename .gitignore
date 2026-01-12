@@ -1,0 +1,12 @@
+/.env
+/docs
+/README.md
+/tradesdata.csv
+/tradesdata_enriched.csv
+/tradesdata_entry_filtered.csv
+/tradesdata_ml_filtered.csv
+/tradesdata_ml_random.csv
+/tradesdata_r_evaluation.csv
+/tradesdata_with_ml_predictions.csv
+/tradesdata_with_signals.csv
+/tradesdata_with_success.csv
