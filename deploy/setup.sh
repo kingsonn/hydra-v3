@@ -12,21 +12,21 @@ echo "=========================================="
 echo "[1/8] Updating system packages..."
 sudo apt update && sudo apt upgrade -y
 
-# Install Python 3.11+ and dependencies
+# Install Python 3.12+ and dependencies
 echo "[2/8] Installing Python and dependencies..."
-sudo apt install -y python3.11 python3.11-venv python3-pip git
+sudo apt install -y python3.12 python3.12-venv python3-pip git
 
 # Create project directory
 echo "[3/8] Setting up project directory..."
 cd /home/ubuntu
 if [ ! -d "hydra-v3" ]; then
-    git clone https://github.com/YOUR_USERNAME/hydra-v3.git
+    git clone https://github.com/kingsonn/hydra-v3.git
 fi
 cd hydra-v3
 
 # Create virtual environment
 echo "[4/8] Creating Python virtual environment..."
-python3.11 -m venv venv
+python3.12 -m venv venv
 source venv/bin/activate
 
 # Install requirements
