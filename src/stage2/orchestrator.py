@@ -239,8 +239,9 @@ class Stage2Orchestrator:
         now_ms = int(time.time() * 1000)
         
         # Compute structure features from rolling trade buffers (every 1 sec)
+        # Pass absorption_z for acceptance veto logic
         self._structure[symbol].set_atr(self._volatility[symbol].get_atr_5m())
-        state.structure = self._structure[symbol].compute()
+        state.structure = self._structure[symbol].compute(state.absorption.absorption_z)
         
         # Update liquidations (periodic update even without new events)
         state.liquidations = self._liquidations[symbol].update()
@@ -374,12 +375,13 @@ class Stage2Orchestrator:
         atr_1h: float,
         last_close_5m: float = 0.0,
         last_close_1h: float = 0.0,
+        vol_5m_history: Optional[List[float]] = None,
     ) -> None:
         """
-        Bootstrap ATR from historical klines
+        Bootstrap ATR and volatility from historical klines
         
         Called at startup to eliminate cold start problem for ATR.
-        Vol_5m is computed from live 250ms returns, not bootstrapped.
+        Vol_5m history used for percentile-based regime detection.
         """
         if symbol in self._volatility:
             self._volatility[symbol].bootstrap(
@@ -389,6 +391,7 @@ class Stage2Orchestrator:
                 atr_1h=atr_1h,
                 last_close_5m=last_close_5m,
                 last_close_1h=last_close_1h,
+                vol_5m_history=vol_5m_history,
             )
             # Update state with bootstrapped values
             self._states[symbol].volatility = self._volatility[symbol].get_features()

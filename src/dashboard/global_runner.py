@@ -1,6 +1,6 @@
 """
-Global Pipeline Runner - Runs all 5 stages with Global Dashboard
-Connects Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 4.5 → Stage 5
+Global Pipeline Runner - Runs all 6 stages with Global Dashboard
+Connects Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 4.5 → Stage 5 → Stage 6
 
 Emits real-time pipeline state for each symbol to the global dashboard.
 
@@ -28,11 +28,18 @@ from src.stage3.thesis_engine import ThesisEngine, PERCENTILE_300_THRESHOLD
 from src.stage3.models import Thesis, Direction
 from src.stage4.filter import FilterResult
 from src.stage5.predictor import PredictionResult
+from src.stage6.position_sizer import PositionSizer
+from src.stage6.models import PositionResult
+from src.stage7.trade_manager import TradeManager
 from src.collectors.klines import bootstrap_all_symbols
 
 from src.dashboard.global_dashboard import (
     broadcast_pipeline_state,
     broadcast_trade,
+    broadcast_position,
+    broadcast_rejection,
+    broadcast_open_positions,
+    broadcast_closed_trades,
 )
 
 logger = structlog.get_logger(__name__)
@@ -60,7 +67,7 @@ class SymbolTracker:
 
 class GlobalPipelineRunner:
     """
-    Runs the complete 5-stage pipeline for all symbols with real-time dashboard.
+    Runs the complete 6-stage pipeline for all symbols with real-time dashboard.
     
     Pipeline Flow:
     1. Stage 1: Data Ingestion (WebSocket trades, orderbook, REST derivatives)
@@ -69,6 +76,7 @@ class GlobalPipelineRunner:
     4. Stage 4: Structural Location Filter
     5. Stage 4.5: Orderflow Confirmation
     6. Stage 5: ML Prediction + Percentile Gate
+    7. Stage 6: Position Sizing (2 tranches with SL/TP)
     """
     
     def __init__(
@@ -80,6 +88,10 @@ class GlobalPipelineRunner:
         self.symbols = symbols or settings.SYMBOLS
         self.dashboard_port = dashboard_port
         self.enable_dashboard = enable_dashboard
+        
+        # Startup delay - disable trading for 6 minutes to let data stabilize
+        self._start_time = time.time()
+        self._trading_enabled_after = 6 * 60  # 6 minutes in seconds
         
         # Per-symbol tracking
         self._trackers: Dict[str, SymbolTracker] = {
@@ -96,6 +108,15 @@ class GlobalPipelineRunner:
         self.thesis_engine = ThesisEngine(
             symbols=self.symbols,
             on_thesis=self._on_thesis,
+        )
+        
+        # Stage 6 position sizer
+        self.position_sizer = PositionSizer(total_risk_dollars=12.0)
+        
+        # Stage 7 trade manager (reset on start for fresh equity)
+        self.trade_manager = TradeManager(
+            initial_equity=1000.0,
+            reset_on_start=True,
         )
         
         # Stage 2 orchestrator
@@ -185,33 +206,210 @@ class GlobalPipelineRunner:
         # Build complete pipeline state dict with ALL Stage 2 values
         data_fresh = (now_ms - tracker.last_trade_ms) < 5000 if tracker.last_trade_ms > 0 else False
         
-        # Determine stage statuses
-        signal_fired = thesis.direction != Direction.NONE and not thesis.veto_reason
+        # Determine stage statuses based on veto_reason prefix
+        # Stage 3: Signal fires if direction is set
+        signal_fired = thesis.direction != Direction.NONE
+        
+        # Stage 4: Check filter result or veto_reason
         stage4_pass = filter_result.allowed if filter_result else False
         stage4_reason = filter_result.reason.value if filter_result else ""
         
-        # Check if blocked at Stage 4
         if thesis.veto_reason and "Stage 4:" in thesis.veto_reason:
             stage4_pass = False
             stage4_reason = thesis.veto_reason.replace("Stage 4: ", "")
         
-        # Stage 4.5 status
+        # Stage 4.5: Pass if we got past Stage 4 and veto is NOT at Stage 4.5
+        # (i.e., veto is at Stage 5 or no veto at all)
         stage45_pass = False
         stage45_reason = ""
         if thesis.veto_reason and "Stage 4.5:" in thesis.veto_reason:
+            # Stage 4.5 failed
+            stage45_pass = False
             stage45_reason = thesis.veto_reason.replace("Stage 4.5: ", "")
         elif stage4_pass and signal_fired:
-            if "Stage 5:" in (thesis.veto_reason or "") or thesis.allowed:
+            # Stage 4 passed, check if we got to Stage 5 or beyond
+            if thesis.veto_reason and "Stage 5:" in thesis.veto_reason:
+                # Stage 4.5 passed but Stage 5 failed
                 stage45_pass = True
                 stage45_reason = "confirmed"
+            elif thesis.allowed:
+                # Everything passed
+                stage45_pass = True
+                stage45_reason = "confirmed"
+            elif not thesis.veto_reason:
+                # No veto at all but not allowed (shouldn't happen)
+                stage45_pass = False
+                stage45_reason = "unknown"
         
-        # Stage 5 status
+        # Stage 5 status - only pass if ML prediction exists and percentile is good
         stage5_pass = False
-        if ml_prediction and thesis.allowed and stage45_pass:
+        if ml_prediction and stage45_pass:
             stage5_pass = ml_prediction.percentile_300 >= PERCENTILE_300_THRESHOLD
         
         # Final trade status
         is_trade = thesis.allowed and stage5_pass
+        
+        # Check if symbol is in HOLDING state (already has active position)
+        is_holding = self.position_sizer.is_holding(symbol)
+        
+        # Stage 6: Position Sizing (only when trade passes Stage 5 and NOT holding)
+        stage6_pass = False
+        stage6_rejection = ""
+        position_result = None
+        
+        if is_trade and is_holding:
+            # Symbol is holding - don't allow new trades
+            is_trade = False
+            stage6_rejection = "HOLDING - position already active"
+        
+        # Check startup delay - disable trading for first 6 minutes
+        time_since_start = time.time() - self._start_time
+        trading_enabled = time_since_start >= self._trading_enabled_after
+        
+        if is_trade and not trading_enabled:
+            is_trade = False
+            remaining = int(self._trading_enabled_after - time_since_start)
+            stage6_rejection = f"WARMUP - {remaining}s remaining"
+        
+        # Check risk manager limits (drawdown/profit protection)
+        if is_trade:
+            can_trade, pause_reason = self.trade_manager.risk_manager.can_trade()
+            if not can_trade:
+                is_trade = False
+                stage6_rejection = pause_reason or "RISK_LIMIT"
+        
+        # Check if we need to flatten all positions (hard stop triggered)
+        if self.trade_manager.risk_manager.should_flatten_all():
+            await self.trade_manager.flatten_all("HARD_STOP_-7%")
+        
+        if is_trade:
+            # Get ATR as percentage
+            atr_5m_pct = state.volatility.atr_5m / state.price if state.price > 0 else 0
+            atr_1h_pct = state.volatility.atr_1h / state.price if state.price > 0 else 0
+            
+            # Get signal name from reasons
+            signal_name = ", ".join([s.name for s in thesis.reasons]) if thesis.reasons else "unknown"
+            
+            # Update position sizer with current equity
+            account = self.trade_manager.get_account_state()
+            self.position_sizer.set_equity(account.current_equity)
+            
+            # Get percentile from prediction for dynamic risk sizing
+            percentile_300 = prediction.percentile_300 if prediction else None
+            
+            # Calculate position with dynamic risk
+            position_result = self.position_sizer.calculate_position(
+                symbol=symbol,
+                side=thesis.direction.value,
+                entry_price=state.price,
+                atr_5m_pct=atr_5m_pct,
+                atr_1h_pct=atr_1h_pct,
+                signal_name=signal_name,
+                current_price=state.price,
+                percentile_300=percentile_300,
+            )
+            
+            stage6_pass = position_result.allowed
+            if not position_result.allowed:
+                stage6_rejection = position_result.rejection_reason or "unknown"
+                is_trade = False  # Reject the trade if Stage 6 fails
+            else:
+                # Stage 7: Place order via TradeManager
+                positions = position_result.positions
+                if len(positions) >= 2:
+                    tranche_a = positions[0]
+                    tranche_b = positions[1]
+                    
+                    # Check margin availability
+                    total_notional = tranche_a.notional + tranche_b.notional
+                    if not self.trade_manager.has_margin_available(total_notional):
+                        stage6_rejection = "INSUFFICIENT_MARGIN"
+                        is_trade = False
+                    else:
+                        # Place order via trade manager
+                        order_ids = await self.trade_manager.place_position(
+                            symbol=symbol,
+                            side=thesis.direction.value,
+                            entry_price=state.price,
+                            tranche_a_size=tranche_a.size,
+                            tranche_a_stop=tranche_a.stop,
+                            tranche_a_tp=tranche_a.tp_a,
+                            tranche_a_breakeven=tranche_a.breakeven,
+                            tranche_a_risk=tranche_a.risk,
+                            tranche_b_size=tranche_b.size,
+                            tranche_b_stop=tranche_b.stop,
+                            tranche_b_tp_partial=tranche_b.tp_b_partial,
+                            tranche_b_tp_runner=tranche_b.tp_b_runner,
+                            tranche_b_breakeven=tranche_b.breakeven,
+                            tranche_b_risk=tranche_b.risk,
+                            signal_name=signal_name,
+                            mode="test",
+                        )
+                        
+                        if not order_ids:
+                            stage6_rejection = "ORDER_PLACEMENT_FAILED"
+                            is_trade = False
+        
+        # Build market state dict for exit strategy evaluation
+        exit_market_state = {
+            "regime": state.regime.value if hasattr(state.regime, 'value') else str(state.regime),
+            "absorption_z": state.absorption.absorption_z,
+            "dist_poc": state.structure.dist_poc,
+            "dist_lvn": state.structure.dist_lvn,
+            "atr_5m": state.volatility.atr_5m,
+            "atr_1h": state.volatility.atr_1h,
+            "vah": state.structure.vah,
+            "val": state.structure.val,
+            "acceptance_outside_value": state.structure.acceptance_outside_value,
+            "moi_z": state.order_flow.moi_z if hasattr(state.order_flow, 'moi_z') else 0.0,
+            "delta_vel_z": state.order_flow.delta_velocity_z if hasattr(state.order_flow, 'delta_velocity_z') else 0.0,
+            "liq_long_usd": state.liquidations.long_usd_30s,
+            "liq_short_usd": state.liquidations.short_usd_30s,
+        }
+        
+        # Update trade manager with current price and market state for exit evaluation
+        trade_events = await self.trade_manager.update_price(symbol, state.price, exit_market_state)
+        
+        # Get account state for dashboard
+        account_state = self.trade_manager.get_account_state()
+        
+        # Update risk manager with current equity for limit checks
+        self.trade_manager.risk_manager.update_equity(
+            account_state.current_equity,
+            account_state.unrealized_pnl,
+        )
+        
+        # Broadcast open positions with live PnL data
+        open_tranches = self.trade_manager.get_open_tranches()
+        if open_tranches:
+            open_positions_data = [
+                {
+                    "order_id": t.order_id,
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "tranche": t.tranche,
+                    "entry_price": t.entry_price,
+                    "current_price": t.current_price,
+                    "size": t.size,
+                    "stop_loss": t.stop_loss,
+                    "take_profit": t.take_profit,
+                    "tp_partial": t.tp_partial,
+                    "tp_runner": t.tp_runner,
+                    "unrealized_pnl": t.unrealized_pnl,
+                    "realized_pnl": t.realized_pnl,
+                    "r_multiple": t.r_multiple,
+                    "status": t.status,
+                    "signal_name": t.signal_name,
+                    "created_at": t.created_at,
+                }
+                for t in open_tranches
+            ]
+            await broadcast_open_positions(open_positions_data)
+        
+        # Broadcast closed trades from risk manager
+        closed_trades = self.trade_manager.risk_manager.get_closed_trades(limit=20)
+        if closed_trades:
+            await broadcast_closed_trades(closed_trades)
         
         # Build complete state dict
         ps = {
@@ -314,26 +512,40 @@ class GlobalPipelineRunner:
             "stage45_pass": stage45_pass,
             "stage45_reason": stage45_reason,
             
-            # ===== STAGE 5: ML Prediction =====
+            # ===== STAGE 5: ML Prediction (only shown when Stage 4.5 passes) =====
             "stage5_pass": stage5_pass,
-            "pred_60": ml_prediction.pred_60 if ml_prediction else 0.0,
-            "pred_300": ml_prediction.pred_300 if ml_prediction else 0.0,
-            "percentile_60": ml_prediction.percentile_60 if ml_prediction else 0.0,
-            "percentile_300": ml_prediction.percentile_300 if ml_prediction else 0.0,
-            "model_used": ml_prediction.model_300 if ml_prediction else "",
+            "pred_60": ml_prediction.pred_60 if (ml_prediction and stage45_pass) else 0.0,
+            "pred_300": ml_prediction.pred_300 if (ml_prediction and stage45_pass) else 0.0,
+            "percentile_60": ml_prediction.percentile_60 if (ml_prediction and stage45_pass) else 0.0,
+            "percentile_300": ml_prediction.percentile_300 if (ml_prediction and stage45_pass) else 0.0,
+            "model_used": ml_prediction.model_300 if (ml_prediction and stage45_pass) else "",
+            
+            # ===== STAGE 6: Position Sizing =====
+            "stage6_pass": stage6_pass,
+            "stage6_rejection": stage6_rejection,
+            "is_holding": is_holding,
+            "position_result": position_result.to_dict() if position_result else None,
             
             # ===== TRADE STATUS =====
             "is_trade": is_trade,
             "trade_direction": thesis.direction.value if is_trade else "",
             "trade_price": state.price if is_trade else 0.0,
             "trade_time": datetime.now().strftime("%H:%M:%S") if is_trade else "",
+            
+            # ===== ACCOUNT STATE (Stage 7) =====
+            "account_equity": account_state.current_equity,
+            "account_margin_available": account_state.margin_available,
+            "account_margin_used": account_state.margin_used,
+            "account_realized_pnl": account_state.realized_pnl,
+            "account_unrealized_pnl": account_state.unrealized_pnl,
+            "account_total_r": account_state.total_r,
         }
         
         # Store state
         self._pipeline_states[symbol] = ps
         
-        # Broadcast trade if new
-        if is_trade:
+        # Broadcast trade and position if new
+        if is_trade and position_result and position_result.allowed:
             trade_data = {
                 "symbol": symbol,
                 "direction": thesis.direction.value,
@@ -346,13 +558,39 @@ class GlobalPipelineRunner:
             }
             await broadcast_trade(trade_data)
             
+            # Broadcast position with all tranche details
+            position_data = {
+                "symbol": symbol,
+                "side": position_result.side,
+                "entry_price": position_result.entry_price,
+                "signal_name": position_result.signal_name,
+                "time": position_result.timestamp,
+                "total_risk": position_result.total_risk,
+                "positions": [p.to_dict() for p in position_result.positions],
+            }
+            await broadcast_position(position_data)
+            
             logger.info(
-                "trade_signal",
+                "trade_signal_with_position",
                 symbol=symbol,
                 direction=thesis.direction.value,
                 price=state.price,
                 pct_300=ps["percentile_300"],
+                signal=position_result.signal_name,
+                tranche_a_size=position_result.positions[0].size if position_result.positions else 0,
+                tranche_b_size=position_result.positions[1].size if len(position_result.positions) > 1 else 0,
             )
+        
+        # Broadcast rejection if Stage 6 failed
+        if position_result and not position_result.allowed:
+            rejection_data = {
+                "symbol": symbol,
+                "reason": stage6_rejection,
+                "atr_1h_pct": position_result.atr_1h_pct,
+                "signal_name": position_result.signal_name,
+                "time": position_result.timestamp,
+            }
+            await broadcast_rejection(rejection_data)
         
         # Broadcast to dashboard
         if self.enable_dashboard:
@@ -380,14 +618,15 @@ class GlobalPipelineRunner:
             dashboard_port=self.dashboard_port if self.enable_dashboard else "disabled",
         )
         
-        # Step 1: Bootstrap ATR from historical klines (eliminates cold start)
-        logger.info("bootstrapping_atr_data", symbols=len(self.symbols))
+        # Step 1: Bootstrap ATR and volatility from historical klines
+        logger.info("bootstrapping_atr_volatility", symbols=len(self.symbols))
         try:
-            atr_data, _ = await bootstrap_all_symbols(self.symbols)
+            atr_data, vol_data = await bootstrap_all_symbols(self.symbols)
             
-            # Apply ATR bootstrap to Stage 2 volatility processors
+            # Apply ATR and volatility bootstrap to Stage 2 processors
             for symbol in self.symbols:
                 if symbol in atr_data:
+                    vol_history = vol_data[symbol].vol_5m_history if symbol in vol_data else None
                     self.stage2.bootstrap_volatility(
                         symbol=symbol,
                         tr_5m_values=atr_data[symbol].tr_5m_deque,
@@ -396,16 +635,18 @@ class GlobalPipelineRunner:
                         atr_1h=atr_data[symbol].atr_1h,
                         last_close_5m=atr_data[symbol].last_close_5m,
                         last_close_1h=atr_data[symbol].last_close_1h,
+                        vol_5m_history=vol_history,
                     )
                     logger.info(
-                        "symbol_atr_bootstrapped",
+                        "symbol_bootstrapped",
                         symbol=symbol,
                         atr_5m=f"{atr_data[symbol].atr_5m:.4f}",
                         atr_1h=f"{atr_data[symbol].atr_1h:.4f}",
+                        vol_history=len(vol_history) if vol_history else 0,
                     )
         except Exception as e:
             logger.error("bootstrap_failed", error=str(e))
-            # Continue without bootstrap - will have cold start for ATR
+            # Continue without bootstrap - will have cold start
         
         # Step 2: Initialize Stage 1
         await self.stage1.initialize()
@@ -465,6 +706,8 @@ class GlobalPipelineRunner:
         signals = sum(1 for ps in self._pipeline_states.values() if ps.get("signal_fired"))
         s4_pass = sum(1 for ps in self._pipeline_states.values() if ps.get("stage4_pass"))
         s45_pass = sum(1 for ps in self._pipeline_states.values() if ps.get("stage45_pass"))
+        s5_pass = sum(1 for ps in self._pipeline_states.values() if ps.get("stage5_pass"))
+        s6_pass = sum(1 for ps in self._pipeline_states.values() if ps.get("stage6_pass"))
         trades = sum(1 for ps in self._pipeline_states.values() if ps.get("is_trade"))
         
         return {
@@ -474,8 +717,11 @@ class GlobalPipelineRunner:
             "signals_fired": signals,
             "stage4_passed": s4_pass,
             "stage45_passed": s45_pass,
+            "stage5_passed": s5_pass,
+            "stage6_passed": s6_pass,
             "active_trades": trades,
             "thesis_engine_stats": self.thesis_engine.get_health_metrics(),
+            "position_sizer_stats": self.position_sizer.get_health_metrics(),
         }
 
 
@@ -485,7 +731,7 @@ async def run_global_pipeline(
     dashboard_port: int = 8888,
 ) -> None:
     """
-    Run the global pipeline with all 5 stages.
+    Run the global pipeline with all 6 stages.
     
     Args:
         symbols: List of symbols to track (default: all from settings)
@@ -510,7 +756,7 @@ async def run_global_pipeline(
             loop.add_signal_handler(sig, signal_handler)
     
     print(f"\n{'='*70}")
-    print("HYDRA Global Pipeline - All 5 Stages")
+    print("HYDRA Global Pipeline - All 6 Stages")
     print(f"{'='*70}")
     print(f"Symbols: {runner.symbols}")
     print(f"Dashboard: http://localhost:{dashboard_port}")
@@ -522,6 +768,7 @@ async def run_global_pipeline(
     print("  Stage 4: Structural Location Filter")
     print("  Stage 4.5: Orderflow Confirmation")
     print("  Stage 5: ML Prediction (percentile_300 >= 80%)")
+    print("  Stage 6: Position Sizing (2 tranches with SL/TP)")
     print(f"")
     print(f"Press Ctrl+C to stop")
     print(f"{'='*70}\n")

@@ -155,11 +155,15 @@ class StructureProcessor:
         while self._trades_30m and self._trades_30m[0][2] < cutoff_30m:
             self._trades_30m.popleft()
     
-    def compute(self) -> StructureFeatures:
+    def compute(self, absorption_z: float = 0.0) -> StructureFeatures:
         """
         Recompute volume profile and all features
         Call this every 1 second, not on every trade
+        
+        Args:
+            absorption_z: Current absorption z-score for acceptance veto
         """
+        self._current_absorption_z = absorption_z
         now_ms = int(time.time() * 1000)
         self._last_compute_ms = now_ms
         
@@ -357,22 +361,53 @@ class StructureProcessor:
         return (inside_count / total_count) * 100.0
     
     def _check_acceptance(self) -> bool:
-        """Check if price accepted outside value area (3 min sustained)"""
+        """
+        Check if price accepted outside value area.
+        
+        Criteria:
+        1. Time outside >= 60% of last 60 seconds
+        2. Volume outside >= 55% of last 60 seconds
+        3. Absorption veto: if absorption_z > 1.0, rejection is happening
+        """
         if self._vah <= 0 or self._val <= 0:
             return False
         
+        # Absorption veto - if significant absorption, price is being rejected
+        if getattr(self, '_current_absorption_z', 0.0) > 1.0:
+            return False
+        
+        # Use 60 second window from trades
         now_ms = int(time.time() * 1000)
-        is_outside = self._current_price > self._vah or self._current_price < self._val
+        cutoff_ms = now_ms - 60_000  # 60 seconds
         
-        if is_outside:
-            if self._outside_value_start is None:
-                self._outside_value_start = now_ms
-            elif now_ms - self._outside_value_start >= self._acceptance_threshold_ms:
-                return True
-        else:
-            self._outside_value_start = None
+        # Collect price/volume data from recent trades
+        prices = []
+        volumes = []
+        for price, qty, ts in self._trades_5m:
+            if ts >= cutoff_ms:
+                prices.append(price)
+                volumes.append(qty)
         
-        return False
+        if len(prices) < 10:  # Need minimum data
+            return False
+        
+        # 1. Time outside value (% of samples)
+        outside_count = sum(1 for p in prices if p > self._vah or p < self._val)
+        time_outside_pct = outside_count / len(prices)
+        
+        # 2. Volume outside value
+        total_volume = sum(volumes)
+        if total_volume < 1e-9:
+            return False
+        
+        volume_outside = sum(
+            v for p, v in zip(prices, volumes)
+            if p > self._vah or p < self._val
+        )
+        volume_outside_pct = volume_outside / total_volume
+        
+        # Acceptance requires both time and volume thresholds
+        return time_outside_pct >= 0.6 and volume_outside_pct >= 0.55
     
     def get_features(self) -> StructureFeatures:
         """Get current features"""
@@ -396,10 +431,10 @@ class MultiSymbolStructureProcessor:
         if trade.symbol in self.processors:
             self.processors[trade.symbol].add_trade(trade)
     
-    def compute(self, symbol: str) -> StructureFeatures:
+    def compute(self, symbol: str, absorption_z: float = 0.0) -> StructureFeatures:
         """Compute features for symbol (call every 1 sec)"""
         if symbol in self.processors:
-            return self.processors[symbol].compute()
+            return self.processors[symbol].compute(absorption_z)
         return StructureFeatures()
     
     def compute_all(self) -> Dict[str, StructureFeatures]:

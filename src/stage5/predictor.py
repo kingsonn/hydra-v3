@@ -7,6 +7,7 @@ Calculates percentile scores using rolling prediction buffer.
 import json
 import pickle
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
@@ -173,32 +174,30 @@ class MLPredictor:
         absorption_z: float,
         dist_lvn: float,
         vol_5m: float,
-    ) -> np.ndarray:
+    ) -> pd.DataFrame:
         """
         Create feature vector with 7 numerical features + 8 one-hot encoded columns.
         
         Returns:
-            numpy array of shape (1, 15)
+            pandas DataFrame with proper column names to avoid sklearn warning
         """
-        # 7 numerical features
-        features = [
-            moi_250ms,
-            moi_1s,
-            delta_velocity,
-            aggression_persistence,
-            absorption_z,
-            dist_lvn,
-            vol_5m,
-        ]
+        # Build feature dict with proper column names
+        feature_dict = {
+            "MOI_250ms": [moi_250ms],
+            "MOI_1s": [moi_1s],
+            "delta_velocity": [delta_velocity],
+            "AggressionPersistence": [aggression_persistence],
+            "absorption_z": [absorption_z],
+            "dist_lvn": [dist_lvn],
+            "vol_5m": [vol_5m],
+        }
         
         # 8 one-hot encoded columns for symbol
         for valid_symbol in VALID_SYMBOLS:
-            if symbol == valid_symbol:
-                features.append(1.0)
-            else:
-                features.append(0.0)
+            col_name = f"pair_{valid_symbol}"
+            feature_dict[col_name] = [1.0 if symbol == valid_symbol else 0.0]
         
-        return np.array([features])
+        return pd.DataFrame(feature_dict)
     
     def _calculate_percentile(self, value: float, buffer: List[float]) -> float:
         """
@@ -270,8 +269,8 @@ class MLPredictor:
             logger.warning("model_not_found", name=model_300_name)
             return result
         
-        # Create feature vector
-        feature_vector = self._create_feature_vector(
+        # Create feature vector as DataFrame with proper column names
+        feature_df = self._create_feature_vector(
             symbol=symbol,
             moi_250ms=moi_250ms,
             moi_1s=moi_1s,
@@ -281,24 +280,24 @@ class MLPredictor:
             dist_lvn=dist_lvn,
             vol_5m=vol_5m,
         )
-        result.features = feature_vector[0].tolist()
+        result.features = feature_df.iloc[0].tolist()
         
         # Run predictions (using last model in ensemble)
         try:
             model_60 = self._models[model_60_name]
             if isinstance(model_60, list):
-                result.pred_60 = float(model_60[-1].predict(feature_vector)[0])
+                result.pred_60 = float(model_60[-1].predict(feature_df)[0])
             else:
-                result.pred_60 = float(model_60.predict(feature_vector)[0])
+                result.pred_60 = float(model_60.predict(feature_df)[0])
         except Exception as e:
             logger.error("prediction_failed", model=model_60_name, error=str(e))
         
         try:
             model_300 = self._models[model_300_name]
             if isinstance(model_300, list):
-                result.pred_300 = float(model_300[-1].predict(feature_vector)[0])
+                result.pred_300 = float(model_300[-1].predict(feature_df)[0])
             else:
-                result.pred_300 = float(model_300.predict(feature_vector)[0])
+                result.pred_300 = float(model_300.predict(feature_df)[0])
         except Exception as e:
             logger.error("prediction_failed", model=model_300_name, error=str(e))
         

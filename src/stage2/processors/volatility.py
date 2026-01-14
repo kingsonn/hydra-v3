@@ -37,6 +37,9 @@ class VolatilityProcessor:
         # 250ms returns for vol_5m calculation (5 min = 1200 bars at 250ms)
         self._returns_250ms: deque[float] = deque(maxlen=1200)
         
+        # Vol_5m history for percentile-based regime (rolling 1500 values = 25 hours)
+        self._vol_5m_history: deque[float] = deque(maxlen=1500)
+        
         # Last closes for TR/return calculation
         self._last_close_5m = 0.0
         self._last_close_1h = 0.0
@@ -60,9 +63,10 @@ class VolatilityProcessor:
         atr_1h: float,
         last_close_5m: float = 0.0,
         last_close_1h: float = 0.0,
+        vol_5m_history: Optional[List[float]] = None,
     ) -> None:
         """
-        Bootstrap ATR from historical klines data
+        Bootstrap ATR and volatility from historical klines data
         
         Args:
             tr_5m_values: Last 14 True Range values for 5m ATR
@@ -71,6 +75,7 @@ class VolatilityProcessor:
             atr_1h: Current ATR_1h
             last_close_5m: Last 5m candle close for TR continuation
             last_close_1h: Last 1h candle close for TR continuation
+            vol_5m_history: Historical vol_5m values for percentile regime
         """
         # Load TR values for live continuation
         for tr in tr_5m_values:
@@ -85,6 +90,11 @@ class VolatilityProcessor:
         # Set last closes for live TR calculation continuity
         self._last_close_5m = last_close_5m
         self._last_close_1h = last_close_1h
+        
+        # Load vol_5m history for percentile-based regime detection
+        if vol_5m_history:
+            for vol in vol_5m_history[-1500:]:  # Keep only last 1500
+                self._vol_5m_history.append(vol)
         
         self._bootstrapped = True
         
@@ -158,26 +168,37 @@ class VolatilityProcessor:
         if len(self._returns_250ms) >= 10:
             vol_5m = float(np.std(self._returns_250ms))
         
+        # Add current vol_5m to rolling history
+        if vol_5m > 0:
+            self._vol_5m_history.append(vol_5m)
+        
         # Vol expansion ratio = ATR_5m / ATR_1h
         vol_expansion_ratio = 0.0
         if self._atr_1h > 1e-9:
             vol_expansion_ratio = self._atr_5m / self._atr_1h
         
-        # Vol regime based on ATR ratio (not percentile rank)
-        # LOW: ratio < 0.7 (short-term vol much lower than long-term)
-        # MID: 0.7 <= ratio < 1.3
-        # HIGH: ratio >= 1.3 (short-term vol expanding)
-        if vol_expansion_ratio < 0.7:
-            vol_regime = "LOW"
-        elif vol_expansion_ratio < 1.3:
-            vol_regime = "MID"
-        else:
-            vol_regime = "HIGH"
+        # Vol regime based on percentile of vol_5m vs history
+        # LOW: vol_5m < 30th percentile
+        # MID: 30th-70th percentile
+        # HIGH: > 70th percentile
+        vol_rank = 0.0
+        vol_regime = "MID"
+        
+        if len(self._vol_5m_history) >= 100:  # Need enough history
+            history_array = np.array(self._vol_5m_history)
+            vol_rank = float(np.sum(history_array < vol_5m) / len(history_array) * 100)
+            
+            if vol_rank < 30:
+                vol_regime = "LOW"
+            elif vol_rank > 70:
+                vol_regime = "HIGH"
+            else:
+                vol_regime = "MID"
         
         self._last_features = VolatilityFeatures(
             vol_5m=vol_5m,
             vol_1h=vol_5m,  # Same as vol_5m for now
-            vol_rank=0.0,   # Removed - not using percentile rank
+            vol_rank=vol_rank,
             vol_regime=vol_regime,
             atr_5m=self._atr_5m,
             atr_1h=self._atr_1h,
@@ -216,12 +237,13 @@ class MultiSymbolVolatilityProcessor:
         atr_1h: float,
         last_close_5m: float = 0.0,
         last_close_1h: float = 0.0,
+        vol_5m_history: Optional[List[float]] = None,
     ) -> None:
-        """Bootstrap a symbol's processor with ATR data"""
+        """Bootstrap a symbol's processor with ATR and volatility data"""
         if symbol in self.processors:
             self.processors[symbol].bootstrap(
                 tr_5m_values, tr_1h_values, atr_5m, atr_1h,
-                last_close_5m, last_close_1h
+                last_close_5m, last_close_1h, vol_5m_history
             )
     
     def add_bar(self, bar: Bar) -> VolatilityFeatures:

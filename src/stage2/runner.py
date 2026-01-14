@@ -73,14 +73,15 @@ class IntegratedRunner:
             dashboard_port=self.dashboard_port if self.enable_dashboard else "disabled",
         )
         
-        # Step 1: Bootstrap ATR from historical klines (vol_5m computed from live data)
-        logger.info("bootstrapping_atr_data", symbols=len(self.symbols))
+        # Step 1: Bootstrap ATR and volatility from historical klines
+        logger.info("bootstrapping_atr_volatility", symbols=len(self.symbols))
         try:
-            atr_data, _ = await bootstrap_all_symbols(self.symbols)
+            atr_data, vol_data = await bootstrap_all_symbols(self.symbols)
             
-            # Apply ATR bootstrap to Stage 2 volatility processors
+            # Apply ATR and volatility bootstrap to Stage 2 processors
             for symbol in self.symbols:
                 if symbol in atr_data:
+                    vol_history = vol_data[symbol].vol_5m_history if symbol in vol_data else None
                     self.stage2.bootstrap_volatility(
                         symbol=symbol,
                         tr_5m_values=atr_data[symbol].tr_5m_deque,
@@ -89,16 +90,18 @@ class IntegratedRunner:
                         atr_1h=atr_data[symbol].atr_1h,
                         last_close_5m=atr_data[symbol].last_close_5m,
                         last_close_1h=atr_data[symbol].last_close_1h,
+                        vol_5m_history=vol_history,
                     )
                     logger.info(
-                        "symbol_atr_bootstrapped",
+                        "symbol_bootstrapped",
                         symbol=symbol,
                         atr_5m=f"{atr_data[symbol].atr_5m:.4f}",
                         atr_1h=f"{atr_data[symbol].atr_1h:.4f}",
+                        vol_history_size=len(vol_history) if vol_history else 0,
                     )
         except Exception as e:
             logger.error("bootstrap_failed", error=str(e))
-            # Continue without bootstrap - will have cold start for ATR
+            # Continue without bootstrap - will have cold start
         
         # Step 2: Initialize Stage 1
         await self.stage1.initialize()

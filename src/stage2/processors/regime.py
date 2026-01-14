@@ -263,13 +263,38 @@ class RegimeClassifier:
         self._last_classification_ms = 0
         self._regime_history: deque[Tuple[int, Regime]] = deque(maxlen=100)
         
-        # Rolling MOI std history for percentile calculation
+        # Rolling MOI std history for percentile calculation (legacy)
         self._moi_std_history: deque[float] = deque(maxlen=200)
         
         # Last scores for transparency
         self._last_expansion_score = 0
         self._last_compression_score = 0
         self._last_is_chop = False
+        
+        # Expansion entry/exit timer state
+        self._expansion_entry_timer = 0.0  # Seconds of sustained expansion signal
+        self._expansion_exit_timer = 0.0   # Seconds of sustained exit conditions
+        self._regime_enter_time = 0.0      # When current regime was entered
+        self._last_update_time = time.time()  # For dt calculation
+        
+        # Thresholds for expansion timing
+        self._expansion_entry_threshold_s = 10.0  # Need 10s of signal to enter
+        self._expansion_min_duration_s = 60.0     # Stay in expansion for at least 60s
+        self._expansion_exit_threshold_s = 15.0   # Need 15s of exit conditions to exit
+        
+        # ===== ADAPTIVE PERCENTILE THRESHOLDS =====
+        # Warmup period - use fixed thresholds for first 35 minutes
+        self._start_time = time.time()
+        self._warmup_duration_s = 35 * 60  # 35 minutes
+        
+        # Rolling windows for adaptive thresholds
+        # Data arrives every 100ms, so:
+        # 30 min = 30 * 60 * 10 = 18000 samples
+        # 15 min = 15 * 60 * 10 = 9000 samples
+        self._vol_expansion_history: deque[float] = deque(maxlen=18000)  # 30 min
+        self._aggression_history: deque[float] = deque(maxlen=9000)      # 15 min
+        self._moi_std_adaptive_history: deque[float] = deque(maxlen=9000)  # 15 min
+        self._moi_flip_rate_history: deque[float] = deque(maxlen=9000)   # 15 min
     
     def classify(
         self,
@@ -312,15 +337,25 @@ class RegimeClassifier:
             absorption_z=absorption.absorption_z,
         )
         
-        # Track MOI std for percentile calculation
+        # Track MOI std for percentile calculation (legacy)
         if inputs.moi_std > 0:
             self._moi_std_history.append(inputs.moi_std)
         
-        # Calculate MOI std percentile thresholds
+        # Populate rolling windows for adaptive thresholds
+        self._vol_expansion_history.append(inputs.vol_expansion_ratio)
+        self._aggression_history.append(inputs.aggression_persistence)
+        self._moi_std_adaptive_history.append(inputs.moi_std)
+        self._moi_flip_rate_history.append(inputs.moi_flip_rate)
+        
+        # Check if warmup period is complete
+        time_since_start = time.time() - self._start_time
+        use_adaptive = time_since_start >= self._warmup_duration_s
+        
+        # Calculate MOI std percentile thresholds (legacy for compression/chop)
         moi_std_threshold = self._get_moi_std_threshold()
         
         # Compute scores
-        expansion_score = self._compute_expansion_score(inputs, moi_std_threshold)
+        expansion_score = self._compute_expansion_score(inputs, moi_std_threshold, use_adaptive)
         compression_score = self._compute_compression_score(inputs, moi_std_threshold)
         is_chop = self._is_chop(inputs)
         
@@ -329,27 +364,94 @@ class RegimeClassifier:
         self._last_compression_score = compression_score
         self._last_is_chop = is_chop
         
-        # REGIME RESOLUTION (priority order)
-        regime = Regime.COMPRESSION  # Default SAFE state
-        confidence = 0.5
-        reason = "Default safe state"
+        # Calculate dt for timer updates
+        now = time.time()
+        dt = now - self._last_update_time
+        self._last_update_time = now
         
-        if expansion_score >= 3:
-            regime = Regime.EXPANSION
-            confidence = min(1.0, expansion_score / 5.0)
-            reason = f"Expansion score {expansion_score}/5"
-        elif compression_score >= 3:
-            regime = Regime.COMPRESSION
-            confidence = min(1.0, compression_score / 5.0)
-            reason = f"Compression score {compression_score}/5"
-        elif is_chop:
-            regime = Regime.CHOP
-            confidence = 0.7
-            reason = "Explicit CHOP conditions met"
+        # REGIME RESOLUTION with timer-based expansion logic
+        regime = self._current_regime
+        confidence = 0.5
+        reason = "Holding current regime"
+        
+        if self._current_regime != Regime.EXPANSION:
+            # NOT in EXPANSION - check if we should enter
+            if expansion_score == 1:  # Expansion signal active
+                self._expansion_entry_timer += dt
+                if self._expansion_entry_timer >= self._expansion_entry_threshold_s:
+                    # Sustained expansion signal for 10s - enter EXPANSION
+                    regime = Regime.EXPANSION
+                    self._regime_enter_time = now
+                    self._expansion_entry_timer = 0.0
+                    self._expansion_exit_timer = 0.0
+                    confidence = 0.85
+                    reason = f"Expansion confirmed (10s sustained)"
+                else:
+                    # Still waiting for confirmation
+                    reason = f"Expansion pending ({self._expansion_entry_timer:.1f}s/{self._expansion_entry_threshold_s}s)"
+                    # Use other logic while waiting
+                    if compression_score >= 3:
+                        regime = Regime.COMPRESSION
+                        confidence = min(1.0, compression_score / 5.0)
+                        reason = f"Compression score {compression_score}/5"
+                    elif is_chop:
+                        regime = Regime.CHOP
+                        confidence = 0.7
+                        reason = "Explicit CHOP conditions met"
+                    else:
+                        regime = Regime.COMPRESSION
+                        confidence = 0.5
+                        reason = f"Waiting for expansion ({self._expansion_entry_timer:.1f}s)"
+            else:
+                # No expansion signal - reset timer
+                self._expansion_entry_timer = 0.0
+                
+                # Normal classification
+                if compression_score >= 3:
+                    regime = Regime.COMPRESSION
+                    confidence = min(1.0, compression_score / 5.0)
+                    reason = f"Compression score {compression_score}/5"
+                elif is_chop:
+                    regime = Regime.CHOP
+                    confidence = 0.7
+                    reason = "Explicit CHOP conditions met"
+                else:
+                    regime = Regime.COMPRESSION
+                    confidence = 0.5
+                    reason = "Transitional state, defaulting to COMPRESSION"
         else:
-            regime = Regime.COMPRESSION  # Transitional/neutral → safe state
-            confidence = 0.5
-            reason = "Transitional state, defaulting to COMPRESSION"
+            # IN EXPANSION - check if we should exit
+            time_in_expansion = now - self._regime_enter_time
+            
+            if time_in_expansion < self._expansion_min_duration_s:
+                # Stay in expansion for at least 60s
+                regime = Regime.EXPANSION
+                confidence = 0.9
+                reason = f"Expansion locked ({time_in_expansion:.0f}s/{self._expansion_min_duration_s:.0f}s min)"
+            else:
+                # Check exit conditions (use adaptive thresholds if past warmup)
+                exit_conditions = self._compute_expansion_exit_score(inputs, moi_std_threshold, use_adaptive)
+                
+                if exit_conditions >= 2:
+                    self._expansion_exit_timer += dt
+                    if self._expansion_exit_timer >= self._expansion_exit_threshold_s:
+                        # Exit conditions sustained for 15s - exit to CHOP
+                        regime = Regime.CHOP
+                        self._expansion_exit_timer = 0.0
+                        self._expansion_entry_timer = 0.0
+                        confidence = 0.7
+                        reason = f"Expansion exit (15s sustained exit conditions)"
+                    else:
+                        # Still in expansion but exit conditions building
+                        regime = Regime.EXPANSION
+                        confidence = 0.7
+                        reason = f"Expansion exit pending ({self._expansion_exit_timer:.1f}s/{self._expansion_exit_threshold_s}s)"
+                else:
+                    # Exit conditions not met - reset timer, stay in expansion
+                    self._expansion_exit_timer = 0.0
+                    regime = Regime.EXPANSION
+                    confidence = 0.85
+                    reason = f"Expansion holding (exit score {exit_conditions}/2)"
         
         # Update state
         self._current_regime = regime
@@ -377,41 +479,109 @@ class RegimeClassifier:
         mid_pct = (low_pct + high_pct) / 2.0
         return float(np.percentile(arr, mid_pct))
     
-    def _compute_expansion_score(self, inputs: RegimeInputs, moi_std_threshold: float) -> int:
+    def _compute_expansion_score(self, inputs: RegimeInputs, moi_std_threshold: float, use_adaptive: bool = False) -> int:
         """
-        Compute EXPANSION score (0-5 points)
+        Compute EXPANSION signal (0 or 1)
         
-        +1 if vol_expansion_ratio > threshold
-        +1 if acceptance_outside_value
-        +1 if AggressionPersistence > threshold
-        +1 if moi_std > moi_std_threshold (directional flow)
-        +1 if delta_flip_rate < mid_flip_threshold (not choppy)
+        During warmup (first 35 min): Use fixed thresholds
+        After warmup: Use adaptive percentile thresholds from rolling windows
+        
+        Core conditions (need >= 2):
+          - vol_expansion_ratio > P70 (or fixed threshold)
+          - moi_std > P60 (or fixed threshold)
+          - aggression_persistence > P65 (or fixed threshold)
+        
+        Confirmation conditions (need >= 1):
+          - acceptance_outside_value
+          - moi_flip_rate < P80 (or fixed threshold)
+        
+        Returns 1 if core >= 2 AND confirm >= 1, else 0
         """
         t = self.thresholds
-        score = 0
+        core = 0
+        confirm = 0
         
-        # Vol expansion
-        if inputs.vol_expansion_ratio > t.vol_expansion_high:
-            score += 1
+        if use_adaptive:
+            # Use adaptive percentile thresholds from rolling windows
+            vol_threshold = self._get_percentile(self._vol_expansion_history, 70)
+            moi_std_thresh = self._get_percentile(self._moi_std_adaptive_history, 60)
+            aggression_threshold = self._get_percentile(self._aggression_history, 65)
+            flip_rate_threshold = self._get_percentile(self._moi_flip_rate_history, 80)
+        else:
+            # Use fixed thresholds during warmup
+            vol_threshold = t.vol_expansion_high
+            moi_std_thresh = moi_std_threshold
+            aggression_threshold = t.aggression_low
+            flip_rate_threshold = t.delta_flip_high
         
-        # Acceptance outside value
+        # ---- CORE ENERGY CONDITIONS ----
+        if inputs.vol_expansion_ratio > vol_threshold:
+            core += 1
+        
+        if inputs.moi_std > moi_std_thresh:
+            core += 1
+        
+        if inputs.aggression_persistence > aggression_threshold:
+            core += 1
+        
+        # ---- CONFIRMATION CONDITIONS ----
         if inputs.acceptance_outside_value:
-            score += 1
+            confirm += 1
         
-        # High aggression persistence
-        if inputs.aggression_persistence > t.aggression_high:
-            score += 1
+        if inputs.moi_flip_rate < flip_rate_threshold:
+            confirm += 1
         
-        # High MOI std (directional, not canceling out)
-        if inputs.moi_std > moi_std_threshold:
-            score += 1
+        # ---- FINAL DECISION ----
+        return 1 if (core >= 2 and confirm >= 1) else 0
+    
+    def _get_percentile(self, history: deque, percentile: float) -> float:
+        """Get percentile value from a rolling history deque"""
+        if len(history) < 100:
+            return float('inf') if percentile > 50 else 0.0  # Conservative defaults
+        arr = np.array(history)
+        return float(np.percentile(arr, percentile))
+    
+    def _compute_expansion_exit_score(self, inputs: RegimeInputs, moi_std_threshold: float, use_adaptive: bool = False) -> int:
+        """
+        Compute expansion EXIT score (0-3 points)
         
-        # Low flip rate (directional, not choppy)
-        mid_flip = (t.delta_flip_low + t.delta_flip_high) / 2.0
-        if inputs.moi_flip_rate < mid_flip:
-            score += 1
+        During warmup: Use fixed thresholds
+        After warmup: Use adaptive percentile thresholds (P30, P35, P35)
         
-        return score
+        Exit conditions:
+          - vol_expansion_ratio < P30 (or vol_compression_low)
+          - moi_std < P35 (or 70% of moi_std_threshold)
+          - aggression_persistence < P35 (or aggression_low)
+        
+        Need >= 2 sustained for 15s to exit expansion
+        """
+        t = self.thresholds
+        exit_score = 0
+        
+        if use_adaptive:
+            # Use adaptive percentile thresholds
+            vol_exit_threshold = self._get_percentile(self._vol_expansion_history, 30)
+            moi_std_exit_threshold = self._get_percentile(self._moi_std_adaptive_history, 35)
+            aggression_exit_threshold = self._get_percentile(self._aggression_history, 35)
+        else:
+            # Use fixed thresholds during warmup
+            vol_exit_threshold = t.vol_compression_low
+            moi_std_exit_threshold = moi_std_threshold * 0.7
+            aggression_exit_threshold = t.aggression_low
+        
+        # Vol has dropped
+        if inputs.vol_expansion_ratio < vol_exit_threshold:
+            exit_score += 1
+        
+        # MOI std has dropped
+        if inputs.moi_std < moi_std_exit_threshold:
+            exit_score += 1
+        
+        # Aggression has dropped
+        if inputs.aggression_persistence < aggression_exit_threshold:
+            exit_score += 1
+        
+        return exit_score
     
     def _compute_compression_score(self, inputs: RegimeInputs, moi_std_threshold: float) -> int:
         """

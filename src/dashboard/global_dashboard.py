@@ -32,6 +32,14 @@ pipeline_states: Dict[str, dict] = {}
 trade_history: List[dict] = []
 MAX_TRADE_HISTORY = 100
 
+# Position history (Stage 6 confirmed positions with tranches)
+position_history: List[dict] = []
+MAX_POSITION_HISTORY = 50
+
+# Rejection history (Stage 6 rejections due to low ATR)
+rejection_history: List[dict] = []
+MAX_REJECTION_HISTORY = 20
+
 
 @dataclass
 class PipelineState:
@@ -191,6 +199,74 @@ async def broadcast_trade(trade: dict) -> None:
             connected_clients.discard(client)
 
 
+async def broadcast_position(position: dict) -> None:
+    """Broadcast new position (Stage 6) to all connected clients"""
+    position_history.insert(0, position)
+    if len(position_history) > MAX_POSITION_HISTORY:
+        position_history.pop()
+    
+    message = json.dumps({
+        "type": "new_position",
+        "data": position
+    })
+    
+    clients = list(connected_clients)
+    for client in clients:
+        try:
+            await client.send_text(message)
+        except Exception:
+            connected_clients.discard(client)
+
+
+async def broadcast_open_positions(positions: List[dict]) -> None:
+    """Broadcast open positions with live PnL data to all connected clients"""
+    message = json.dumps({
+        "type": "open_positions",
+        "data": positions
+    })
+    
+    clients = list(connected_clients)
+    for client in clients:
+        try:
+            await client.send_text(message)
+        except Exception:
+            connected_clients.discard(client)
+
+
+async def broadcast_closed_trades(trades: List[dict]) -> None:
+    """Broadcast closed trades to all connected clients"""
+    message = json.dumps({
+        "type": "closed_trades",
+        "data": trades
+    })
+    
+    clients = list(connected_clients)
+    for client in clients:
+        try:
+            await client.send_text(message)
+        except Exception:
+            connected_clients.discard(client)
+
+
+async def broadcast_rejection(rejection: dict) -> None:
+    """Broadcast Stage 6 rejection to all connected clients"""
+    rejection_history.insert(0, rejection)
+    if len(rejection_history) > MAX_REJECTION_HISTORY:
+        rejection_history.pop()
+    
+    message = json.dumps({
+        "type": "new_rejection",
+        "data": rejection
+    })
+    
+    clients = list(connected_clients)
+    for client in clients:
+        try:
+            await client.send_text(message)
+        except Exception:
+            connected_clients.discard(client)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""
@@ -210,6 +286,20 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_text(json.dumps({
             "type": "trade_history",
             "data": trade_history
+        }))
+    
+    # Send position history
+    if position_history:
+        await websocket.send_text(json.dumps({
+            "type": "position_history",
+            "data": position_history
+        }))
+    
+    # Send rejection history
+    if rejection_history:
+        await websocket.send_text(json.dumps({
+            "type": "rejection_history",
+            "data": rejection_history
         }))
     
     try:
@@ -262,18 +352,25 @@ DASHBOARD_HTML = """
         .status.disconnected { color: #ff4444; }
         
         .main-container {
-            display: grid;
-            grid-template-columns: 1fr 300px;
+            display: flex;
             gap: 15px;
             max-height: calc(100vh - 100px);
         }
         
         .pairs-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            grid-template-columns: 1fr 1fr;
             gap: 12px;
             overflow-y: auto;
             max-height: calc(100vh - 100px);
+            align-content: start;
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .sidebar {
+            width: 300px;
+            flex-shrink: 0;
         }
         
         .pair-card {
@@ -281,8 +378,9 @@ DASHBOARD_HTML = """
             border-radius: 8px;
             padding: 12px;
             border: 1px solid #2a2a4a;
-            transition: all 0.3s ease;
+            transition: border-color 0.3s ease;
             font-size: 0.8rem;
+            overflow: hidden;
         }
         .pair-card:hover { border-color: #4a4a6a; }
         .pair-card.has-trade {
@@ -307,6 +405,44 @@ DASHBOARD_HTML = """
             font-size: 1.1rem;
             font-weight: 600;
             color: #00d4ff;
+        }
+        
+        .stages-minimal {
+            display: flex;
+            gap: 6px;
+            margin: 8px 0;
+            justify-content: center;
+        }
+        .stage-dot {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.65rem;
+            cursor: default;
+        }
+        .stage-dot.pending { background: #333; color: #666; }
+        .stage-dot.ok { background: #00ff88; color: #000; }
+        .stage-dot.fail { background: #ff4444; color: #fff; }
+        .stage-dot.active { background: #ffaa00; color: #000; }
+        
+        .signal-compact {
+            font-size: 0.75rem;
+            color: #00ff88;
+            text-align: center;
+            padding: 4px;
+            background: rgba(0,255,136,0.1);
+            border-radius: 4px;
+            margin: 4px 0;
+        }
+        .veto-compact {
+            font-size: 0.7rem;
+            color: #ff4444;
+            text-align: center;
+            padding: 3px;
         }
         
         .stages {
@@ -389,6 +525,24 @@ DASHBOARD_HTML = """
         .direction-SHORT { background: #ff4444; color: #fff; }
         .direction-NONE { background: #333; color: #666; }
         
+        /* Holding state */
+        .holding-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, #7c3aed, #5b21b6);
+            color: #fff;
+            margin-left: 6px;
+            animation: pulse 2s infinite;
+        }
+        .pair-card.is-holding {
+            border-color: #7c3aed;
+            box-shadow: 0 0 15px rgba(124, 58, 237, 0.3);
+        }
+        
         /* Trade Section */
         .trade-section {
             background: #12121a;
@@ -448,6 +602,106 @@ DASHBOARD_HTML = """
             text-align: center;
             padding: 30px;
             color: #666;
+        }
+        
+        /* Position Section */
+        .position-item {
+            padding: 12px;
+            background: #1a1a2a;
+            border-radius: 8px;
+            border-left: 4px solid #00ff88;
+            margin-bottom: 12px;
+        }
+        .position-item.short {
+            border-left-color: #ff4444;
+        }
+        .position-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .position-symbol {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #fff;
+        }
+        .position-signal {
+            font-size: 0.7rem;
+            color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .position-time {
+            font-size: 0.7rem;
+            color: #666;
+        }
+        .tranche-container {
+            display: flex;
+            gap: 10px;
+            margin-top: 8px;
+        }
+        .tranche {
+            flex: 1;
+            background: #0a0a0f;
+            border-radius: 6px;
+            padding: 8px;
+        }
+        .tranche-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .tranche-name {
+            font-weight: 700;
+            font-size: 0.8rem;
+        }
+        .tranche-name.a { color: #00d4ff; }
+        .tranche-name.b { color: #7c3aed; }
+        .tranche-size {
+            font-size: 0.75rem;
+            color: #888;
+        }
+        .tranche-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            margin: 3px 0;
+        }
+        .tranche-label {
+            color: #666;
+        }
+        .tranche-value {
+            color: #fff;
+            font-weight: 500;
+        }
+        .tranche-value.stop { color: #ff4444; }
+        .tranche-value.tp { color: #00ff88; }
+        .tranche-value.entry { color: #00d4ff; }
+        
+        /* Rejection Section */
+        .rejection-item {
+            padding: 10px;
+            background: rgba(255, 68, 68, 0.1);
+            border-radius: 6px;
+            border-left: 3px solid #ff4444;
+            margin-bottom: 8px;
+        }
+        .rejection-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        .rejection-symbol {
+            font-weight: 700;
+            color: #ff4444;
+        }
+        .rejection-reason {
+            font-size: 0.75rem;
+            color: #ff8888;
         }
         
         /* Metrics row */
@@ -589,20 +843,68 @@ DASHBOARD_HTML = """
             </div>
         </div>
         
-        <div class="trade-section">
-            <h2>🎯 ACTIVE TRADES</h2>
-            <div class="trade-list" id="trade-list">
-                <div class="no-trades">No trades yet</div>
+        <div class="trade-section sidebar">
+            <!-- Account Status -->
+            <div id="account-status" style="background: linear-gradient(135deg, #1a1a2a, #2a2a4a); border-radius: 8px; padding: 12px; margin-bottom: 15px; border: 1px solid #3a3a5a;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="color: #888; font-size: 0.75rem; text-transform: uppercase;">Account</span>
+                    <span id="account-mode" style="background: #7c3aed; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem;">TEST</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                    <span style="color: #888; font-size: 0.8rem;">Equity</span>
+                    <span id="account-equity" style="color: #00ff88; font-weight: 700; font-size: 1.1rem;">$1,000.00</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                    <span style="color: #888; font-size: 0.75rem;">Margin Available</span>
+                    <span id="account-margin" style="color: #00d4ff; font-size: 0.9rem;">$1,000.00</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                    <span style="color: #888; font-size: 0.75rem;">Unrealized PnL</span>
+                    <span id="account-unrealized" style="color: #888; font-size: 0.9rem;">$0.00</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                    <span style="color: #888; font-size: 0.75rem;">Realized PnL</span>
+                    <span id="account-realized" style="color: #888; font-size: 0.9rem;">$0.00</span>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span style="color: #888; font-size: 0.75rem;">Total R</span>
+                    <span id="account-total-r" style="color: #888; font-size: 0.9rem;">0.00R</span>
+                </div>
+            </div>
+            
+            <h2>📊 OPEN POSITIONS</h2>
+            <div id="position-list">
+                <div class="no-trades">No positions yet</div>
+            </div>
+            
+            <h2 style="margin-top: 20px; color: #ff4444;">⚠️ REJECTIONS</h2>
+            <div id="rejection-list">
+                <div class="no-trades" style="padding: 15px;">No rejections</div>
+            </div>
+            
+            <h2 style="margin-top: 20px; color: #7c3aed;">📜 CLOSED TRADES</h2>
+            <div id="closed-trades-list" style="max-height: 300px; overflow-y: auto;">
+                <div class="no-trades" style="padding: 15px;">No closed trades</div>
             </div>
         </div>
     </div>
 
     <script>
         const pairsGrid = document.getElementById('pairs-grid');
-        const tradeList = document.getElementById('trade-list');
+        const positionList = document.getElementById('position-list');
+        const rejectionList = document.getElementById('rejection-list');
+        const closedTradesList = document.getElementById('closed-trades-list');
         const status = document.getElementById('status');
+        const accountEquity = document.getElementById('account-equity');
+        const accountMargin = document.getElementById('account-margin');
+        const accountUnrealized = document.getElementById('account-unrealized');
+        const accountRealized = document.getElementById('account-realized');
+        const accountTotalR = document.getElementById('account-total-r');
         const states = {};
-        const trades = [];
+        const positions = [];
+        let lastAccountState = {};
+        const rejections = [];
+        let closedTrades = [];
         
         function formatNumber(n, decimals = 2) {
             if (n === undefined || n === null) return '-';
@@ -643,6 +945,7 @@ DASHBOARD_HTML = """
             const s4Status = (d.stage4_reason || '').includes('REJECTED') || (d.stage4_reason || '').includes('bad') ? 'fail' : (d.stage4_pass ? 'ok' : 'pending');
             const s45Status = (d.stage45_reason || '').includes('not_confirmed') ? 'fail' : (d.stage45_pass ? 'ok' : 'pending');
             const s5Status = d.percentile_300 < 80 && d.percentile_300 > 0 ? 'fail' : (d.stage5_pass ? 'ok' : 'pending');
+            const s6Status = d.stage6_rejection ? 'fail' : (d.stage6_pass ? 'ok' : 'pending');
             
             // Liquidation bar
             const longUsd = d.liq_long_usd_30s || 0;
@@ -653,121 +956,41 @@ DASHBOARD_HTML = """
             // Cascade/exhaustion indicators
             const cascadeHtml = d.liq_cascade_active ? '<span class="indicator cascade">CASCADE</span>' : '';
             const exhaustHtml = d.liq_exhaustion ? '<span class="indicator exhaust">EXHAUST</span>' : '';
+            const holdingHtml = d.is_holding ? '<span class="holding-badge">HOLDING</span>' : '';
+            
+            // Card classes
+            const cardClasses = ['pair-card'];
+            if (hasTrade) cardClasses.push('has-trade');
+            if (d.is_holding) cardClasses.push('is-holding');
             
             return `
-                <div class="pair-card ${hasTrade ? 'has-trade' : ''}" id="card-${symbol}">
+                <div class="${cardClasses.join(' ')}" id="card-${symbol}">
                     <div class="pair-header">
                         <div>
                             <span class="symbol">${symbol}</span>
                             <span class="regime-badge regime-${d.regime}">${d.regime}</span>
-                            ${cascadeHtml}${exhaustHtml}
+                            ${holdingHtml}${cascadeHtml}${exhaustHtml}
                         </div>
                         <span class="price">$${formatPrice(d.price)}</span>
                     </div>
                     
-                    <!-- PIPELINE STAGES -->
-                    <div class="stages">
-                        <div class="stage"><div class="stage-num ${s1Status}">1</div><div class="stage-content"><span>Data</span><span class="stage-value ${d.stage1_ok?'pass':''}">${d.stage1_ok?'OK':'WAIT'}</span></div></div>
-                        <div class="stage"><div class="stage-num ${s2Status}">2</div><div class="stage-content"><span>Regime</span><span class="stage-value">${d.regime}</span></div></div>
-                        <div class="stage"><div class="stage-num ${s3Status}">3</div><div class="stage-content"><span>Signal</span><span class="stage-value ${d.signal_fired?'pass':''}">${d.signal_fired ? d.signal_direction : (d.stage3_veto ? 'BLOCKED' : 'WAIT')}</span></div></div>
-                        <div class="stage"><div class="stage-num ${s4Status}">4</div><div class="stage-content"><span>Structure</span><span class="stage-value ${d.stage4_pass?'pass':(d.stage4_reason?'fail':'')}">${d.stage4_pass ? 'PASS' : (d.stage4_reason || 'WAIT')}</span></div></div>
-                        <div class="stage"><div class="stage-num ${s45Status}">4.5</div><div class="stage-content"><span>Orderflow</span><span class="stage-value ${d.stage45_pass?'pass':''}">${d.stage45_pass ? 'OK' : (d.stage45_reason || 'WAIT')}</span></div></div>
-                        <div class="stage"><div class="stage-num ${s5Status}">5</div><div class="stage-content"><span>ML pct_300</span><span class="stage-value ${d.percentile_300>=80?'pass':(d.percentile_300>0?'fail':'')}">${d.percentile_300 > 0 ? formatNumber(d.percentile_300,0)+'%' : 'WAIT'}</span></div></div>
+                    <!-- PIPELINE STAGES - MINIMAL -->
+                    <div class="stages-minimal">
+                        <span class="stage-dot ${s1Status}" title="Data">1</span>
+                        <span class="stage-dot ${s2Status}" title="Regime">2</span>
+                        <span class="stage-dot ${s3Status}" title="Signal">3</span>
+                        <span class="stage-dot ${s4Status}" title="Structure">4</span>
+                        <span class="stage-dot ${s45Status}" title="Orderflow">4.5</span>
+                        <span class="stage-dot ${s5Status}" title="ML">5</span>
+                        <span class="stage-dot ${s6Status}" title="Position">6</span>
                     </div>
                     
-                    ${d.signal_fired ? `<div class="signal-info"><b>Signals:</b> ${(d.signal_reasons||[]).join(', ') || 'N/A'}</div>` : ''}
-                    ${d.stage3_veto ? `<div class="veto-info">${d.stage3_veto}</div>` : ''}
-                    
-                    <!-- REGIME SCORES -->
-                    <div class="section-title">Regime Scores</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">Expansion</div><div class="metric-value ${(d.regime_expansion_score||0)>=3?'positive':''}">${d.regime_expansion_score||0}/5</div></div>
-                        <div class="metric"><div class="metric-label">Compression</div><div class="metric-value ${(d.regime_compression_score||0)>=3?'neutral':''}">${d.regime_compression_score||0}/5</div></div>
-                        <div class="metric"><div class="metric-label">Chop</div><div class="metric-value ${(d.regime_chop_score||0)>0?'negative':''}">${(d.regime_chop_score||0)>0?'YES':'NO'}</div></div>
-                        <div class="metric"><div class="metric-label">Confidence</div><div class="metric-value">${formatNumber((d.regime_confidence||0)*100,0)}%</div></div>
-                        <div class="metric"><div class="metric-label">Time</div><div class="metric-value">${formatNumber(d.time_in_regime||0,0)}s</div></div>
-                        <div class="metric"><div class="metric-label">Price Δ5m</div><div class="metric-value ${getValueClass((d.price_change_5m||0)*100)}">${formatNumber((d.price_change_5m||0)*100,2)}%</div></div>
-                    </div>
-                    
-                    <!-- ORDER FLOW -->
-                    <div class="section-title">Order Flow</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">MOI 250ms</div><div class="metric-value ${getValueClass(d.of_moi_250ms)}">${formatNumber(d.of_moi_250ms,3)}</div></div>
-                        <div class="metric"><div class="metric-label">MOI 1s</div><div class="metric-value ${getValueClass(d.of_moi_1s)}">${formatNumber(d.of_moi_1s,3)}</div></div>
-                        <div class="metric"><div class="metric-label">Δ Velocity</div><div class="metric-value ${getValueClass(d.of_delta_velocity)}">${formatNumber(d.of_delta_velocity,3)}</div></div>
-                        <div class="metric"><div class="metric-label">Aggression</div><div class="metric-value">${formatNumber(d.of_aggression_persistence,2)}</div></div>
-                        <div class="metric"><div class="metric-label">MOI Std</div><div class="metric-value">${formatNumber(d.of_moi_std,3)}</div></div>
-                        <div class="metric"><div class="metric-label">Flip Rate</div><div class="metric-value">${formatNumber(d.of_moi_flip_rate,1)}/m</div></div>
-                    </div>
-                    
-                    <!-- ABSORPTION -->
-                    <div class="section-title">Absorption</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">Absorb Z</div><div class="metric-value ${getValueClass(d.abs_absorption_z,1)}">${formatNumber(d.abs_absorption_z,2)}</div></div>
-                        <div class="metric"><div class="metric-label">Refill</div><div class="metric-value">${formatNumber(d.abs_refill_rate,2)}</div></div>
-                        <div class="metric"><div class="metric-label">Sweep</div><div class="metric-value ${d.abs_liquidity_sweep?'negative':''}">${d.abs_liquidity_sweep?'YES':'NO'}</div></div>
-                        <div class="metric"><div class="metric-label">Depth Imb</div><div class="metric-value ${getValueClass(d.abs_depth_imbalance)}">${formatNumber((d.abs_depth_imbalance||0)*100,1)}%</div></div>
-                    </div>
-                    
-                    <!-- VOLATILITY -->
-                    <div class="section-title">Volatility</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">ATR 5m</div><div class="metric-value">${formatNumber(d.vol_atr_5m,4)}</div></div>
-                        <div class="metric"><div class="metric-label">ATR 1h</div><div class="metric-value">${formatNumber(d.vol_atr_1h,4)}</div></div>
-                        <div class="metric"><div class="metric-label">Expansion</div><div class="metric-value">${formatNumber(d.vol_vol_expansion_ratio,2)}x</div></div>
-                        <div class="metric"><div class="metric-label">Rank</div><div class="metric-value">${formatNumber(d.vol_vol_rank,0)}%</div></div>
-                        <div class="metric"><div class="metric-label">Vol 5m</div><div class="metric-value">${formatNumber((d.vol_vol_5m||0)*100,2)}%</div></div>
-                        <div class="metric"><div class="metric-label">Regime</div><div class="metric-value">${d.vol_vol_regime||'MID'}</div></div>
-                    </div>
-                    
-                    <!-- STRUCTURE -->
-                    <div class="section-title">Structure</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">POC</div><div class="metric-value">$${formatPrice(d.str_poc)}</div></div>
-                        <div class="metric"><div class="metric-label">VAH</div><div class="metric-value">$${formatPrice(d.str_vah)}</div></div>
-                        <div class="metric"><div class="metric-label">VAL</div><div class="metric-value">$${formatPrice(d.str_val)}</div></div>
-                        <div class="metric"><div class="metric-label">Dist LVN</div><div class="metric-value">${formatNumber(d.str_dist_lvn,2)} ATR</div></div>
-                        <div class="metric"><div class="metric-label">Dist POC</div><div class="metric-value">${formatNumber(d.str_dist_poc,2)} ATR</div></div>
-                        <div class="metric"><div class="metric-label">VA Width</div><div class="metric-value">$${formatNumber(d.str_value_area_width,2)}</div></div>
-                    </div>
-                    
-                    <!-- LIQUIDATIONS -->
-                    <div class="section-title">Liquidations</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">Long 30s</div><div class="metric-value positive">$${formatNumber(longUsd,0)}</div></div>
-                        <div class="metric"><div class="metric-label">Short 30s</div><div class="metric-value negative">$${formatNumber(shortUsd,0)}</div></div>
-                        <div class="metric"><div class="metric-label">Imbal 30s</div><div class="metric-value ${getValueClass(d.liq_imbalance_30s)}">${formatNumber((d.liq_imbalance_30s||0)*100,0)}%</div></div>
-                        <div class="metric"><div class="metric-label">Total 2m</div><div class="metric-value">$${formatNumber((d.liq_long_usd_2m||0)+(d.liq_short_usd_2m||0),0)}</div></div>
-                        <div class="metric"><div class="metric-label">Total 5m</div><div class="metric-value">$${formatNumber((d.liq_long_usd_5m||0)+(d.liq_short_usd_5m||0),0)}</div></div>
-                        <div class="metric"><div class="metric-label">Cascade</div><div class="metric-value ${d.liq_cascade_active?'negative':''}">${d.liq_cascade_active?'YES':'NO'}</div></div>
-                    </div>
-                    <div class="liq-bar"><div class="liq-bar-inner liq-long" style="width:${longPct}%"></div></div>
-                    
-                    <!-- DERIVATIVES -->
-                    <div class="section-title">Derivatives</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">Fund Rate</div><div class="metric-value ${getValueClass((d.fund_rate||0)*10000)}">${formatNumber((d.fund_rate||0)*100,4)}%</div></div>
-                        <div class="metric"><div class="metric-label">Fund Z</div><div class="metric-value ${getValueClass(d.fund_funding_z,1)}">${formatNumber(d.fund_funding_z,2)}</div></div>
-                        <div class="metric"><div class="metric-label">Crowd</div><div class="metric-value">${d.fund_crowd_side||'NEUTRAL'}</div></div>
-                        <div class="metric"><div class="metric-label">OI</div><div class="metric-value">${formatNumber(d.oi_oi,0)}</div></div>
-                        <div class="metric"><div class="metric-label">OI Δ1m</div><div class="metric-value ${getValueClass((d.oi_oi_delta_1m||0)*100)}">${formatNumber((d.oi_oi_delta_1m||0)*100,2)}%</div></div>
-                        <div class="metric"><div class="metric-label">OI Δ5m</div><div class="metric-value ${getValueClass((d.oi_oi_delta_5m||0)*100)}">${formatNumber((d.oi_oi_delta_5m||0)*100,2)}%</div></div>
-                    </div>
-                    
-                    <!-- ML PREDICTION -->
-                    ${d.percentile_300 > 0 ? `
-                    <div class="section-title">ML Prediction</div>
-                    <div class="metrics-row">
-                        <div class="metric"><div class="metric-label">Pred 60</div><div class="metric-value">${formatNumber(d.pred_60,4)}</div></div>
-                        <div class="metric"><div class="metric-label">Pred 300</div><div class="metric-value">${formatNumber(d.pred_300,4)}</div></div>
-                        <div class="metric"><div class="metric-label">Pct 60</div><div class="metric-value">${formatNumber(d.percentile_60,0)}%</div></div>
-                        <div class="metric"><div class="metric-label">Pct 300</div><div class="metric-value ${d.percentile_300>=80?'positive':'negative'}">${formatNumber(d.percentile_300,0)}%</div></div>
-                    </div>
-                    ` : ''}
+                    ${d.signal_fired ? `<div class="signal-compact">${d.signal_direction}: ${(d.signal_reasons||[]).join(', ') || 'N/A'}</div>` : ''}
+                    ${d.stage3_veto ? `<div class="veto-compact">${d.stage3_veto}</div>` : ''}
                     
                     ${hasTrade ? `
                     <div class="trade-active">
-                        <div class="trade-active-label">🎯 TRADE ACTIVE</div>
+                        <div class="trade-active-label">🎯 TRADE</div>
                         <div class="trade-active-value">${d.trade_direction} @ $${formatPrice(d.trade_price)}</div>
                     </div>
                     ` : ''}
@@ -775,19 +998,59 @@ DASHBOARD_HTML = """
             `;
         }
         
-        function renderTradeItem(trade) {
-            const isShort = trade.direction === 'SHORT';
+        function renderPositionItem(pos) {
+            const isShort = pos.side === 'SHORT';
+            const tranches = pos.positions || [];
+            const trancheA = tranches.find(t => t.tranche === 'A') || {};
+            const trancheB = tranches.find(t => t.tranche === 'B') || {};
+            
             return `
-                <div class="trade-item ${isShort ? 'short' : ''}">
-                    <div class="trade-header">
-                        <span class="trade-symbol">${trade.symbol}</span>
-                        <span class="trade-time">${trade.time}</span>
+                <div class="position-item ${isShort ? 'short' : ''}">
+                    <div class="position-header">
+                        <div>
+                            <span class="position-symbol">${pos.symbol}</span>
+                            <span class="direction-badge direction-${pos.side}">${pos.side}</span>
+                        </div>
+                        <span class="position-time">${pos.time}</span>
                     </div>
-                    <div class="trade-details">
-                        <span class="direction-badge direction-${trade.direction}">${trade.direction}</span>
-                        <span class="trade-price">$${formatPrice(trade.price)}</span>
-                        <span class="trade-pct">pct_300: ${formatNumber(trade.percentile_300, 0)}%</span>
+                    <div class="position-signal">Signal: ${pos.signal_name || 'N/A'}</div>
+                    <div style="font-size: 0.75rem; color: #888; margin: 4px 0;">Entry: $${formatPrice(pos.entry_price)} | Risk: $${pos.total_risk}</div>
+                    
+                    <div class="tranche-container">
+                        <div class="tranche">
+                            <div class="tranche-header">
+                                <span class="tranche-name a">Tranche A</span>
+                                <span class="tranche-size">${trancheA.size || 0}</span>
+                            </div>
+                            <div class="tranche-row"><span class="tranche-label">Stop</span><span class="tranche-value stop">$${formatPrice(trancheA.stop)}</span></div>
+                            <div class="tranche-row"><span class="tranche-label">TP (1R)</span><span class="tranche-value tp">$${formatPrice(trancheA.tp_a)}</span></div>
+                            <div class="tranche-row"><span class="tranche-label">B/E</span><span class="tranche-value">$${formatPrice(trancheA.breakeven)}</span></div>
+                            <div class="tranche-row"><span class="tranche-label">Risk</span><span class="tranche-value">$${trancheA.risk || 0}</span></div>
+                        </div>
+                        <div class="tranche">
+                            <div class="tranche-header">
+                                <span class="tranche-name b">Tranche B</span>
+                                <span class="tranche-size">${trancheB.size || 0}</span>
+                            </div>
+                            <div class="tranche-row"><span class="tranche-label">Stop</span><span class="tranche-value stop">$${formatPrice(trancheB.stop)}</span></div>
+                            <div class="tranche-row"><span class="tranche-label">TP1 (2R)</span><span class="tranche-value tp">$${formatPrice(trancheB.tp_b_partial)} (40%)</span></div>
+                            <div class="tranche-row"><span class="tranche-label">TP2 (3R)</span><span class="tranche-value tp">$${formatPrice(trancheB.tp_b_runner)}</span></div>
+                            <div class="tranche-row"><span class="tranche-label">Risk</span><span class="tranche-value">$${trancheB.risk || 0}</span></div>
+                        </div>
                     </div>
+                </div>
+            `;
+        }
+        
+        function renderRejectionItem(rej) {
+            return `
+                <div class="rejection-item">
+                    <div class="rejection-header">
+                        <span class="rejection-symbol">${rej.symbol}</span>
+                        <span class="position-time">${rej.time}</span>
+                    </div>
+                    <div class="rejection-reason">${rej.reason}</div>
+                    <div style="font-size: 0.7rem; color: #666; margin-top: 4px;">Signal: ${rej.signal_name || 'N/A'}</div>
                 </div>
             `;
         }
@@ -799,12 +1062,130 @@ DASHBOARD_HTML = """
             pairsGrid.innerHTML = symbols.map(s => renderPairCard(states[s])).join('');
         }
         
-        function updateTrades() {
-            if (trades.length === 0) {
-                tradeList.innerHTML = '<div class="no-trades">No trades yet</div>';
+        function updatePositions() {
+            if (positions.length === 0) {
+                positionList.innerHTML = '<div class="no-trades">No positions yet</div>';
+            } else {
+                positionList.innerHTML = positions.map(p => renderPositionItem(p)).join('');
+            }
+        }
+        
+        function updateRejections() {
+            if (rejections.length === 0) {
+                rejectionList.innerHTML = '<div class="no-trades" style="padding: 15px;">No rejections</div>';
+            } else {
+                rejectionList.innerHTML = rejections.map(r => renderRejectionItem(r)).join('');
+            }
+        }
+        
+        let openPositionsData = [];
+        
+        function updateOpenPositions(tranches) {
+            openPositionsData = tranches;
+            renderOpenPositions();
+        }
+        
+        function renderOpenPositions() {
+            if (openPositionsData.length === 0) {
+                positionList.innerHTML = '<div class="no-trades">No open positions</div>';
                 return;
             }
-            tradeList.innerHTML = trades.map(t => renderTradeItem(t)).join('');
+            
+            // Group tranches by symbol
+            const bySymbol = {};
+            openPositionsData.forEach(t => {
+                if (!bySymbol[t.symbol]) bySymbol[t.symbol] = [];
+                bySymbol[t.symbol].push(t);
+            });
+            
+            let html = '';
+            Object.entries(bySymbol).forEach(([symbol, tranches]) => {
+                const trancheA = tranches.find(t => t.tranche === 'A');
+                const trancheB = tranches.find(t => t.tranche === 'B');
+                const side = tranches[0].side;
+                const isShort = side === 'SHORT';
+                
+                // Calculate totals
+                const totalUnrealizedPnl = tranches.reduce((sum, t) => sum + (t.unrealized_pnl || 0), 0);
+                const totalRealizedPnl = tranches.reduce((sum, t) => sum + (t.realized_pnl || 0), 0);
+                const avgR = tranches.reduce((sum, t) => sum + (t.r_multiple || 0), 0) / tranches.length;
+                const currentPrice = tranches[0].current_price || 0;
+                const entryPrice = tranches[0].entry_price || 0;
+                
+                const pnlColor = totalUnrealizedPnl >= 0 ? '#00ff88' : '#ff4444';
+                const rColor = avgR >= 0 ? '#00ff88' : '#ff4444';
+                
+                html += `
+                    <div class="position-item ${isShort ? 'short' : ''}">
+                        <div class="position-header">
+                            <div>
+                                <span class="position-symbol">${symbol}</span>
+                                <span class="direction-badge direction-${side}">${side}</span>
+                            </div>
+                            <span style="color: ${pnlColor}; font-weight: 700; font-size: 0.9rem;">${totalUnrealizedPnl >= 0 ? '+' : ''}$${totalUnrealizedPnl.toFixed(2)}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; margin: 4px 0;">
+                            <span>Entry: $${formatPrice(entryPrice)}</span>
+                            <span>Current: $${formatPrice(currentPrice)}</span>
+                            <span style="color: ${rColor}; font-weight: 600;">${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R</span>
+                        </div>
+                        <div class="position-signal">Signal: ${tranches[0].signal_name || 'N/A'}</div>
+                        
+                        <div class="tranche-container">
+                            ${trancheA ? `
+                            <div class="tranche">
+                                <div class="tranche-header">
+                                    <span class="tranche-name a">Tranche A</span>
+                                    <span style="color: ${(trancheA.unrealized_pnl || 0) >= 0 ? '#00ff88' : '#ff4444'}; font-size: 0.7rem;">${(trancheA.unrealized_pnl || 0) >= 0 ? '+' : ''}$${(trancheA.unrealized_pnl || 0).toFixed(2)}</span>
+                                </div>
+                                <div class="tranche-row"><span class="tranche-label">Size</span><span class="tranche-value">${trancheA.size || 0}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">Stop</span><span class="tranche-value stop">$${formatPrice(trancheA.stop_loss)}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">TP</span><span class="tranche-value tp">$${formatPrice(trancheA.take_profit)}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">R</span><span class="tranche-value" style="color: ${(trancheA.r_multiple || 0) >= 0 ? '#00ff88' : '#ff4444'}">${(trancheA.r_multiple || 0) >= 0 ? '+' : ''}${(trancheA.r_multiple || 0).toFixed(2)}R</span></div>
+                            </div>
+                            ` : '<div class="tranche" style="opacity: 0.5;"><div class="tranche-header"><span class="tranche-name a">Tranche A</span><span style="color: #888;">CLOSED</span></div></div>'}
+                            ${trancheB ? `
+                            <div class="tranche">
+                                <div class="tranche-header">
+                                    <span class="tranche-name b">Tranche B ${trancheB.status === 'partial' ? '(PARTIAL)' : ''}</span>
+                                    <span style="color: ${(trancheB.unrealized_pnl || 0) >= 0 ? '#00ff88' : '#ff4444'}; font-size: 0.7rem;">${(trancheB.unrealized_pnl || 0) >= 0 ? '+' : ''}$${(trancheB.unrealized_pnl || 0).toFixed(2)}</span>
+                                </div>
+                                <div class="tranche-row"><span class="tranche-label">Size</span><span class="tranche-value">${trancheB.size || 0}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">Stop</span><span class="tranche-value stop">$${formatPrice(trancheB.stop_loss)}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">TP (Runner)</span><span class="tranche-value tp">$${formatPrice(trancheB.tp_runner)}</span></div>
+                                <div class="tranche-row"><span class="tranche-label">R</span><span class="tranche-value" style="color: ${(trancheB.r_multiple || 0) >= 0 ? '#00ff88' : '#ff4444'}">${(trancheB.r_multiple || 0) >= 0 ? '+' : ''}${(trancheB.r_multiple || 0).toFixed(2)}R</span></div>
+                            </div>
+                            ` : '<div class="tranche" style="opacity: 0.5;"><div class="tranche-header"><span class="tranche-name b">Tranche B</span><span style="color: #888;">CLOSED</span></div></div>'}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            positionList.innerHTML = html;
+        }
+        
+        function updateAccountState(data) {
+            if (!data) return;
+            
+            const equity = data.account_equity || 1000;
+            const margin = data.account_margin_available || 1000;
+            const unrealized = data.account_unrealized_pnl || 0;
+            const realized = data.account_realized_pnl || 0;
+            const totalR = data.account_total_r || 0;
+            
+            accountEquity.textContent = '$' + equity.toFixed(2);
+            accountEquity.style.color = equity >= 1000 ? '#00ff88' : '#ff4444';
+            
+            accountMargin.textContent = '$' + margin.toFixed(2);
+            
+            accountUnrealized.textContent = (unrealized >= 0 ? '+' : '') + '$' + unrealized.toFixed(2);
+            accountUnrealized.style.color = unrealized >= 0 ? '#00ff88' : '#ff4444';
+            
+            accountRealized.textContent = (realized >= 0 ? '+' : '') + '$' + realized.toFixed(2);
+            accountRealized.style.color = realized >= 0 ? '#00ff88' : '#ff4444';
+            
+            accountTotalR.textContent = (totalR >= 0 ? '+' : '') + totalR.toFixed(2) + 'R';
+            accountTotalR.style.color = totalR >= 0 ? '#00ff88' : '#ff4444';
         }
         
         function connect() {
@@ -831,19 +1212,73 @@ DASHBOARD_HTML = """
                 if (msg.type === 'pipeline_state') {
                     states[msg.data.symbol] = msg.data;
                     updateGrid();
+                    updateAccountState(msg.data);
                 } else if (msg.type === 'all_states') {
                     Object.assign(states, msg.data);
                     updateGrid();
+                    // Update account from first symbol's data
+                    const firstSymbol = Object.keys(msg.data)[0];
+                    if (firstSymbol) updateAccountState(msg.data[firstSymbol]);
+                } else if (msg.type === 'new_position') {
+                    positions.unshift(msg.data);
+                    if (positions.length > 50) positions.pop();
+                    updatePositions();
+                } else if (msg.type === 'position_history') {
+                    positions.length = 0;
+                    positions.push(...msg.data);
+                    updatePositions();
+                } else if (msg.type === 'new_rejection') {
+                    rejections.unshift(msg.data);
+                    if (rejections.length > 20) rejections.pop();
+                    updateRejections();
+                } else if (msg.type === 'rejection_history') {
+                    rejections.length = 0;
+                    rejections.push(...msg.data);
+                    updateRejections();
+                } else if (msg.type === 'open_positions') {
+                    // Update open positions with live PnL data
+                    updateOpenPositions(msg.data);
+                } else if (msg.type === 'closed_trades') {
+                    // Update closed trades list
+                    closedTrades = msg.data;
+                    renderClosedTrades();
                 } else if (msg.type === 'new_trade') {
-                    trades.unshift(msg.data);
-                    if (trades.length > 100) trades.pop();
-                    updateTrades();
+                    // Keep for backward compatibility
                 } else if (msg.type === 'trade_history') {
-                    trades.length = 0;
-                    trades.push(...msg.data);
-                    updateTrades();
+                    // Keep for backward compatibility
                 }
             };
+        }
+        
+        function renderClosedTrades() {
+            if (closedTrades.length === 0) {
+                closedTradesList.innerHTML = '<div class="no-trades" style="padding: 15px;">No closed trades</div>';
+                return;
+            }
+            
+            let html = closedTrades.map(t => {
+                const pnlColor = t.realized_pnl >= 0 ? '#00ff88' : '#ff4444';
+                const rColor = t.r_multiple >= 0 ? '#00ff88' : '#ff4444';
+                const isWin = t.realized_pnl >= 0;
+                
+                return `
+                    <div style="padding: 8px; margin-bottom: 6px; background: ${isWin ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,68,0.1)'}; border-radius: 6px; border-left: 3px solid ${pnlColor};">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                            <span style="font-weight: 600; font-size: 0.8rem;">${t.symbol}</span>
+                            <span style="color: ${pnlColor}; font-weight: 700; font-size: 0.85rem;">${t.realized_pnl >= 0 ? '+' : ''}$${t.realized_pnl.toFixed(2)}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: #888;">
+                            <span>${t.side} ${t.tranche}</span>
+                            <span style="color: ${rColor}">${t.r_multiple >= 0 ? '+' : ''}${t.r_multiple.toFixed(2)}R</span>
+                        </div>
+                        <div style="font-size: 0.65rem; color: #666; margin-top: 2px;">
+                            ${t.close_reason} • ${t.closed_at ? t.closed_at.split('T')[1]?.split('.')[0] || '' : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            closedTradesList.innerHTML = html;
         }
         
         connect();

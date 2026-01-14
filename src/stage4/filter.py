@@ -16,7 +16,7 @@ from src.stage2.processors.regime import PAIR_THRESHOLDS, PairThresholds
 
 # LVN distance threshold (in ATR units)
 # If price is within this distance of LVN, signal is allowed
-LVN_THRESHOLD = 0.5
+LVN_THRESHOLD = 0.3
 
 # Default thresholds for unknown pairs
 DEFAULT_THRESHOLDS = PairThresholds()
@@ -72,9 +72,9 @@ def structural_location_ok(
     """
     Check if structural location is valid for the given direction.
     
-    We only trade:
-    - Near 5m LVN (ML learned this is important)
-    - OR at 30m value extremes (VAL for LONG, VAH for SHORT)
+    We only trade when BOTH conditions are met:
+    - Near 5m LVN (dist_lvn < threshold)
+    - AND at 30m value extremes (VAL for LONG, VAH for SHORT)
     - Everywhere else → WAIT
     
     Args:
@@ -93,18 +93,19 @@ def structural_location_ok(
     if regime == "CHOP":
         return False, FilterReason.REJECTED_CHOP
     
-    # Check LVN proximity (works for both directions)
-    if dist_lvn < lvn_threshold:
-        return True, FilterReason.ALLOWED_NEAR_LVN
+    # Must be near LVN first
+    near_lvn = dist_lvn < lvn_threshold
+    if not near_lvn:
+        return False, FilterReason.REJECTED_BAD_LOCATION
     
-    # Check value area extremes based on direction
+    # Also must be at value area extreme based on direction
     if direction == Direction.LONG:
-        # LONG allowed at VAL (value area low)
+        # LONG requires near LVN AND at VAL (value area low)
         if val > 0 and price <= val:
             return True, FilterReason.ALLOWED_AT_VAL
     
     elif direction == Direction.SHORT:
-        # SHORT allowed at VAH (value area high)
+        # SHORT requires near LVN AND at VAH (value area high)
         if vah > 0 and price >= vah:
             return True, FilterReason.ALLOWED_AT_VAH
     

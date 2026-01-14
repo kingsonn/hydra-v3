@@ -190,15 +190,16 @@ def compute_atr_from_klines(klines: List[Kline], period: int = 14) -> Tuple[floa
     return atr, recent_tr
 
 
-def compute_volatility_from_klines(klines: List[Kline], window: int = 12) -> Tuple[float, List[float]]:
+def compute_volatility_from_klines(
+    klines: List[Kline],
+    window: int = 5,
+) -> Tuple[float, List[float]]:
     """
-    Compute realized volatility from klines
-    
-    vol_5m = rolling_std of returns over window
+    Compute volatility from klines (1m timeframe)
     
     Args:
-        klines: 5m klines
-        window: Rolling window for std (12 = 1 hour of 5m bars)
+        klines: 1m klines (higher frequency for proper vol calculation)
+        window: Rolling window for std (5 = 5 minutes of 1m bars)
     
     Returns:
         Tuple of (current vol_5m, history of vol_5m values)
@@ -206,7 +207,7 @@ def compute_volatility_from_klines(klines: List[Kline], window: int = 12) -> Tup
     if len(klines) < window + 1:
         return 0.0, []
     
-    # Compute returns
+    # Compute returns from 1m bars
     returns = []
     for i in range(1, len(klines)):
         if klines[i-1].close > 0:
@@ -216,7 +217,7 @@ def compute_volatility_from_klines(klines: List[Kline], window: int = 12) -> Tup
     if len(returns) < window:
         return 0.0, []
     
-    # Compute rolling volatility
+    # Compute rolling volatility (std of returns over 5-min window)
     vol_history = []
     for i in range(window - 1, len(returns)):
         window_returns = returns[i - window + 1:i + 1]
@@ -276,29 +277,19 @@ async def bootstrap_volatility(
     """
     Bootstrap volatility data for a symbol
     
-    Fetches 2000 5m klines, computes vol_5m history
+    Fetches 1500 1m klines (25 hours), computes vol_5m using 5-bar rolling std
+    This gives us ~1495 vol_5m values for percentile-based regime detection
     """
-    # Fetch 1500 klines (Binance limit), then another batch if needed
-    # Actually Binance limit is 1500, so we need 2 requests
-    klines = []
-    
-    # First batch - most recent 1500
-    batch1 = await fetch_klines(session, symbol, "5m", 1500)
-    if batch1:
-        # Get end time of first candle in batch1 for second request
-        if len(batch1) >= 1500:
-            # Fetch older klines
-            # Need to specify endTime to get earlier data
-            # For simplicity, just use 1500 - it's ~5 days of 5m data
-            pass
-        klines = batch1
+    # Fetch 1m klines (higher frequency for proper vol calculation)
+    # 1500 x 1m = 25 hours of data
+    klines = await fetch_klines(session, symbol, "1m", 1500)
     
     if not klines:
         logger.warning("volatility_bootstrap_no_data", symbol=symbol)
         return VolatilityData(vol_5m=0.0, vol_5m_history=[])
     
-    # Compute volatility history (rolling std of returns, window=12 = 1 hour)
-    current_vol, vol_history = compute_volatility_from_klines(klines, window=12)
+    # Compute volatility history using 5-bar (5 min) rolling std of 1m returns
+    current_vol, vol_history = compute_volatility_from_klines(klines, window=5)
     
     logger.info(
         "volatility_bootstrapped",

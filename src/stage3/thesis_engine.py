@@ -16,12 +16,14 @@ from src.stage3.processors.signals import (
     oi_divergence,
     crowding_fade,
     funding_carry,
+    inventory_lock,
+    failed_acceptance_reversal,
 )
 from src.stage4.filter import StructuralFilter, FilterResult, orderflow_confirmation
 from src.stage5.predictor import MLPredictor, PredictionResult
 
 # Percentile threshold for Stage 5 gate (top 20% = >= 80)
-PERCENTILE_300_THRESHOLD = 80.0
+PERCENTILE_300_THRESHOLD = 85.0
 
 logger = structlog.get_logger(__name__)
 
@@ -33,11 +35,11 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class ThesisConfig:
     """Configuration for thesis generation"""
-    # Minimum score to allow trading
-    min_score_threshold: float = 0.6
+    # Minimum score to allow trading (lowered from 0.6 to allow single strong signals)
+    min_score_threshold: float = 0.55
     
-    # Minimum asymmetry between long/short scores
-    min_asymmetry: float = 0.35
+    # Minimum asymmetry between long/short scores (lowered for clearer signals)
+    min_asymmetry: float = 0.25
     
     # Extreme funding level for veto in expansion
     extreme_funding_z: float = 2.5
@@ -166,6 +168,9 @@ class ThesisEngine:
         # Last ML prediction per symbol (for transparency)
         self._ml_predictions: Dict[str, PredictionResult] = {}
         
+        # Orderflow filter details per symbol (for transparency)
+        self._orderflow_details: Dict[str, Dict] = {}
+        
         # Stats
         self._signal_counts: Dict[str, int] = {s: 0 for s in symbols}
         self._thesis_count = 0
@@ -239,9 +244,20 @@ class ThesisEngine:
         """Build ThesisState from MarketState with computed values"""
         symbol = state.symbol
         
-        # Get price changes
-        price_change_5m = self._price_trackers[symbol].get_price_change(300)
+        # Use price_change_5m from MarketState (computed by Stage 2)
+        # This ensures consistency with dashboard display
+        price_change_5m = state.price_change_5m
+        
+        # For 15m, use internal tracker (Stage 2 doesn't compute this yet)
         price_change_15m = self._price_trackers[symbol].get_price_change(900)
+        
+        # Compute derived order flow z-scores for inventory lock signal
+        moi_std = state.order_flow.moi_std + 1e-9
+        aggression_persistence = state.order_flow.aggression_persistence + 1e-9
+        
+        moi_z = abs(state.order_flow.moi_1s) / moi_std
+        delta_vel_z = abs(state.order_flow.delta_velocity) / moi_std
+        flip_noise = state.order_flow.moi_flip_rate / aggression_persistence
         
         return ThesisState(
             symbol=symbol,
@@ -256,11 +272,24 @@ class ThesisEngine:
             vol_regime=state.volatility.vol_regime,
             vol_rank=state.volatility.vol_rank,
             time_in_regime=time_in_regime,
+            # Absorption
             absorption_z=state.absorption.absorption_z,
+            refill_rate=state.absorption.refill_rate,
+            liquidity_sweep=state.absorption.liquidity_sweep,
             # Structure for Stage 4 filtering
             dist_lvn=state.structure.dist_lvn,
+            dist_poc=state.structure.dist_poc,
             vah=state.structure.vah,
             val=state.structure.val,
+            # Order flow for inventory lock signal
+            moi_1s=state.order_flow.moi_1s,
+            moi_z=moi_z,
+            delta_vel_z=delta_vel_z,
+            flip_noise=flip_noise,
+            aggression_persistence=state.order_flow.aggression_persistence,
+            vol_expansion_ratio=state.volatility.vol_expansion_ratio,
+            # Structure for FAR signal
+            acceptance_outside_value=state.structure.acceptance_outside_value,
         )
     
     def _generate_thesis(self, state: ThesisState) -> Thesis:
@@ -328,6 +357,25 @@ class ThesisEngine:
         fc = funding_carry(state)
         if fc:
             signals.append(fc)
+        
+        # Signal 6: Inventory lock (ILI)
+        ili = inventory_lock(state)
+        if ili:
+            signals.append(ili)
+        
+        # Signal 7: Failed Acceptance Reversal (FAR)
+        far = failed_acceptance_reversal(state)
+        if far:
+            signals.append(far)
+        
+        # Log all detected signals
+        # if signals:
+        #     logger.info(
+        #         "thesis_signals_detected",
+        #         symbol=state.symbol,
+        #         count=len(signals),
+        #         signals=[f"{s.direction.value}:{s.name}:{s.confidence}" for s in signals],
+        #     )
         
         # ========== SCORE DIRECTIONS ==========
         
@@ -403,16 +451,32 @@ class ThesisEngine:
         # Store result for transparency
         self._filter_results[state.symbol] = result
         
-        # If filter rejects, update thesis
+        # If filter rejects, update thesis with detailed reason
         if not result.allowed:
+            # Build detailed rejection reason
+            lvn_threshold = self._structural_filter.lvn_threshold
+            details = []
+            
+            if result.reason.value == "regime_chop":
+                details.append("regime=CHOP")
+            elif result.reason.value == "bad_structural_location":
+                details.append(f"dist_lvn={state.dist_lvn:.3f}>={lvn_threshold}")
+                if thesis.direction == Direction.LONG:
+                    details.append(f"price={state.price:.2f}>VAL={state.val:.2f}")
+                else:  # SHORT
+                    details.append(f"price={state.price:.2f}<VAH={state.vah:.2f}")
+            
+            reason_str = ", ".join(details) if details else result.reason.value
+            
             return Thesis(
                 allowed=False,
                 direction=thesis.direction,  # Keep direction for transparency
                 strength=thesis.strength,
                 reasons=thesis.reasons,
-                veto_reason=f"Stage 4: {result.reason.value}",
+                veto_reason=f"Stage 4: {reason_str}",
             )
         
+        # Add pass reason to result for transparency
         return thesis
     
     def _apply_orderflow_filter(
@@ -425,22 +489,70 @@ class ThesisEngine:
         
         Confirms that orderflow aligns with signal direction.
         """
+        from src.stage2.processors.regime import PAIR_THRESHOLDS, PairThresholds
+        from src.stage4.filter import DEPTH_IMBALANCE_THRESHOLD
+        
+        symbol = market_state.symbol
+        delta_velocity = market_state.order_flow.delta_velocity
+        depth_imbalance = market_state.absorption.depth_imbalance
+        absorption_z = market_state.absorption.absorption_z
+        
+        # Get pair-specific thresholds
+        thresholds = PAIR_THRESHOLDS.get(symbol, PairThresholds())
+        absorb_threshold = thresholds.absorption_z_spike
+        
         confirmed = orderflow_confirmation(
             direction=thesis.direction,
-            symbol=market_state.symbol,
-            delta_velocity=market_state.order_flow.delta_velocity,
-            depth_imbalance=market_state.absorption.depth_imbalance,
-            absorption_z=market_state.absorption.absorption_z,
+            symbol=symbol,
+            delta_velocity=delta_velocity,
+            depth_imbalance=depth_imbalance,
+            absorption_z=absorption_z,
         )
         
+        # Store orderflow filter details for transparency
+        self._orderflow_details[symbol] = {
+            "delta_velocity": delta_velocity,
+            "depth_imbalance": depth_imbalance,
+            "absorption_z": absorption_z,
+            "depth_threshold": DEPTH_IMBALANCE_THRESHOLD,
+            "absorb_threshold": absorb_threshold,
+            "confirmed": confirmed,
+        }
+        
         if not confirmed:
+            # Build detailed rejection reason
+            reasons = []
+            if thesis.direction == Direction.LONG:
+                if delta_velocity <= 0:
+                    reasons.append(f"delta_vel={delta_velocity:.3f}<=0")
+                if depth_imbalance <= DEPTH_IMBALANCE_THRESHOLD:
+                    reasons.append(f"depth_imb={depth_imbalance:.3f}<={DEPTH_IMBALANCE_THRESHOLD}")
+                if absorption_z >= absorb_threshold:
+                    reasons.append(f"absorb_z={absorption_z:.2f}>={absorb_threshold}")
+            else:  # SHORT
+                if delta_velocity >= 0:
+                    reasons.append(f"delta_vel={delta_velocity:.3f}>=0")
+                if depth_imbalance >= -DEPTH_IMBALANCE_THRESHOLD:
+                    reasons.append(f"depth_imb={depth_imbalance:.3f}>={-DEPTH_IMBALANCE_THRESHOLD}")
+                if absorption_z <= -absorb_threshold:
+                    reasons.append(f"absorb_z={absorption_z:.2f}<={-absorb_threshold}")
+            
+            reason_str = ", ".join(reasons) if reasons else "conditions_not_met"
+            
+            # Clear ML prediction when Stage 4.5 fails
+            if symbol in self._ml_predictions:
+                del self._ml_predictions[symbol]
+            
             return Thesis(
                 allowed=False,
                 direction=thesis.direction,
                 strength=thesis.strength,
                 reasons=thesis.reasons,
-                veto_reason="Stage 4.5: orderflow_not_confirmed",
+                veto_reason=f"Stage 4.5: {reason_str}",
             )
+        
+        # Store success reason
+        self._orderflow_details[symbol]["reason"] = "confirmed"
         
         return thesis
     
@@ -507,6 +619,10 @@ class ThesisEngine:
     def get_ml_prediction(self, symbol: str) -> Optional[PredictionResult]:
         """Get last Stage 5 ML prediction for symbol"""
         return self._ml_predictions.get(symbol)
+    
+    def get_orderflow_details(self, symbol: str) -> Optional[Dict]:
+        """Get last Stage 4.5 orderflow filter details for symbol"""
+        return self._orderflow_details.get(symbol)
     
     def get_all_ml_predictions(self) -> Dict[str, PredictionResult]:
         """Get all ML predictions"""

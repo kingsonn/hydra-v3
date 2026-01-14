@@ -109,11 +109,27 @@ class ThesisState:
     
     # Absorption (for liquidation exhaustion)
     absorption_z: float = 0.0
+    refill_rate: float = 0.0
+    liquidity_sweep: bool = False
     
     # Structure (for Stage 4 filtering)
     dist_lvn: float = 0.0        # Distance to LVN in ATR units
+    dist_poc: float = 0.0        # Distance to POC in ATR units
     vah: float = 0.0             # Value Area High (30m)
     val: float = 0.0             # Value Area Low (30m)
+    
+    # Order flow (for inventory lock signal)
+    moi_1s: float = 0.0          # Raw MOI for direction detection
+    moi_z: float = 0.0           # |moi_1s| / moi_std
+    delta_vel_z: float = 0.0     # |delta_velocity| / moi_std
+    flip_noise: float = 0.0      # moi_flip_rate / aggression_persistence
+    aggression_persistence: float = 0.0
+    
+    # Volatility (for location gate)
+    vol_expansion_ratio: float = 0.0
+    
+    # Structure (for FAR signal)
+    acceptance_outside_value: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -130,7 +146,17 @@ class ThesisState:
             "vol_rank": self.vol_rank,
             "time_in_regime": self.time_in_regime,
             "absorption_z": self.absorption_z,
+            "refill_rate": self.refill_rate,
+            "liquidity_sweep": self.liquidity_sweep,
             "dist_lvn": self.dist_lvn,
+            "dist_poc": self.dist_poc,
             "vah": self.vah,
             "val": self.val,
+            "moi_1s": self.moi_1s,
+            "moi_z": self.moi_z,
+            "delta_vel_z": self.delta_vel_z,
+            "flip_noise": self.flip_noise,
+            "aggression_persistence": self.aggression_persistence,
+            "vol_expansion_ratio": self.vol_expansion_ratio,
+            "acceptance_outside_value": self.acceptance_outside_value,
         }
