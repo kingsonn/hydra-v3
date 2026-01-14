@@ -1,0 +1,28 @@
+[Unit]
+Description=Hydra Trading Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hydra-v3
+ExecStart=/home/ubuntu/hydra-v3/venv/bin/python -m src.dashboard.global_runner
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/hydra-v3/logs/hydra.log
+StandardError=append:/home/ubuntu/hydra-v3/logs/hydra_error.log
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/hydra-v3/.env
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=4G
+
+# Watchdog - restart if unresponsive for 5 minutes
+WatchdogSec=300
+
+[Install]
+WantedBy=multi-user.target
