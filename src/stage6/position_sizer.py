@@ -219,7 +219,7 @@ class PositionSizer:
             actual_notional = size * entry_price
             
             # Calculate fees (entry + exit)
-            total_fees = 2 * actual_notional * self.fee_pct
+            total_fees = actual_notional * self.fee_pct
             
             # Calculate TP prices based on R profit in dollars
             # For n*R profit: raw_pnl_needed = n * risk + total_fees
@@ -239,10 +239,10 @@ class PositionSizer:
             # Stop loss and breakeven
             if side == "LONG":
                 stop_price = entry_price * (1 - raw_stop_pct)
-                breakeven_price = entry_price * (1 + 2 * self.fee_pct)  # Cover round-trip fees
+                breakeven_price = entry_price * (1 + self.fee_pct)  # Cover round-trip fees
             else:  # SHORT
                 stop_price = entry_price * (1 + raw_stop_pct)
-                breakeven_price = entry_price * (1 - 2 * self.fee_pct)  # Cover round-trip fees
+                breakeven_price = entry_price * (1 - self.fee_pct)  # Cover round-trip fees
             
             position = Position(
                 tranche=t["name"],
