@@ -224,6 +224,11 @@ class TradeManager:
             side=side,
             order_id_a=order_a.order_id,
             order_id_b=order_b.order_id,
+            entry_price=entry_price,
+            tranche_a_tp=tranche_a_tp,
+            tranche_a_sl=tranche_a_stop,
+            tranche_b_tp_runner=tranche_b_tp_runner,
+            tranche_b_sl=tranche_b_stop,
             total_notional=f"${total_notional:.2f}",
             margin_used=f"${required_margin:.2f}",
         )
@@ -255,6 +260,19 @@ class TradeManager:
         Returns:
             List of events (SL hit, TP hit, hard exit, etc.)
         """
+        try:
+            return await self._update_price_impl(symbol, current_price, market_state)
+        except Exception as e:
+            logger.error("update_price_error", symbol=symbol, error=str(e))
+            return []
+    
+    async def _update_price_impl(
+        self,
+        symbol: str,
+        current_price: float,
+        market_state: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Internal implementation of update_price"""
         self._current_prices[symbol] = current_price
         events = []
         
@@ -524,8 +542,13 @@ class TradeManager:
         logger.info(
             "tp_hit_a",
             symbol=tranche.symbol,
+            side=tranche.side,
             entry=tranche.entry_price,
             exit=current_price,
+            tp=tranche.take_profit,
+            size=tranche.size,
+            raw_pnl=f"${pnl_data['raw_pnl']:.2f}",
+            fees=f"${pnl_data['entry_fee'] + pnl_data['exit_fee']:.2f}",
             pnl=f"${realized_pnl:.2f}",
             r=f"{r_multiple:.2f}R",
         )
