@@ -370,6 +370,12 @@ class GlobalPipelineRunner:
         # Update trade manager with current price and market state for exit evaluation
         trade_events = await self.trade_manager.update_price(symbol, state.price, exit_market_state)
         
+        # Check if all tranches for this symbol are now closed - if so, clear holding state
+        symbol_tranches = [t for t in self.trade_manager.get_open_tranches() if t.symbol == symbol]
+        if not symbol_tranches and self.position_sizer.is_holding(symbol):
+            self.position_sizer.clear_position(symbol)
+            logger.info("holding_state_cleared", symbol=symbol, reason="all_tranches_closed")
+        
         # Get account state for dashboard
         account_state = self.trade_manager.get_account_state()
         
@@ -379,32 +385,31 @@ class GlobalPipelineRunner:
             account_state.unrealized_pnl,
         )
         
-        # Broadcast open positions with live PnL data
+        # Broadcast open positions with live PnL data (always broadcast to clear when empty)
         open_tranches = self.trade_manager.get_open_tranches()
-        if open_tranches:
-            open_positions_data = [
-                {
-                    "order_id": t.order_id,
-                    "symbol": t.symbol,
-                    "side": t.side,
-                    "tranche": t.tranche,
-                    "entry_price": t.entry_price,
-                    "current_price": t.current_price,
-                    "size": t.size,
-                    "stop_loss": t.stop_loss,
-                    "take_profit": t.take_profit,
-                    "tp_partial": t.tp_partial,
-                    "tp_runner": t.tp_runner,
-                    "unrealized_pnl": t.unrealized_pnl,
-                    "realized_pnl": t.realized_pnl,
-                    "r_multiple": t.r_multiple,
-                    "status": t.status,
-                    "signal_name": t.signal_name,
-                    "created_at": t.created_at,
-                }
-                for t in open_tranches
-            ]
-            await broadcast_open_positions(open_positions_data)
+        open_positions_data = [
+            {
+                "order_id": t.order_id,
+                "symbol": t.symbol,
+                "side": t.side,
+                "tranche": t.tranche,
+                "entry_price": t.entry_price,
+                "current_price": t.current_price,
+                "size": t.size,
+                "stop_loss": t.stop_loss,
+                "take_profit": t.take_profit,
+                "tp_partial": t.tp_partial,
+                "tp_runner": t.tp_runner,
+                "unrealized_pnl": t.unrealized_pnl,
+                "realized_pnl": t.realized_pnl,
+                "r_multiple": t.r_multiple,
+                "status": t.status,
+                "signal_name": t.signal_name,
+                "created_at": t.created_at,
+            }
+            for t in open_tranches
+        ]
+        await broadcast_open_positions(open_positions_data)
         
         # Broadcast closed trades from risk manager
         closed_trades = self.trade_manager.risk_manager.get_closed_trades(limit=20)

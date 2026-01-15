@@ -29,7 +29,7 @@ MIN_STOP_PCT = 2 * FEE_PCT        # 0.16% - minimum stop distance
 TIGHT_MULT = 1.0                  # Tranche A multiplier
 WIDE_MULT = 1.8                   # Tranche B multiplier
 
-TP_A_R = 1.5                      # Tranche A full TP (1.5R) - covers fees on tight stops
+TP_A_R = 1.0                      # Tranche A full TP (1R profit after fees)
 TP_B_PARTIAL_R = 2.0              # Tranche B partial TP (2R)
 TP_B_PARTIAL_PCT = 0.4            # % of Tranche B size to close at partial TP
 TP_B_RUNNER_R = 3.0               # Tranche B runner TP (3R)
@@ -204,27 +204,45 @@ class PositionSizer:
         
         for t in tranches:
             raw_stop_pct = t["mult"] * atr_5m_pct
-            
-            if side == "LONG":
-                stop_price = entry_price * (1 - raw_stop_pct)
-                tp_a_price = entry_price * (1 + raw_stop_pct * TP_A_R)
-                tp_b_partial_price = entry_price * (1 + raw_stop_pct * TP_B_PARTIAL_R)
-                tp_b_runner_price = entry_price * (1 + raw_stop_pct * TP_B_RUNNER_R)
-                breakeven_price = entry_price * (1 + self.fee_pct)
-            else:  # SHORT
-                stop_price = entry_price * (1 + raw_stop_pct)
-                tp_a_price = entry_price * (1 - raw_stop_pct * TP_A_R)
-                tp_b_partial_price = entry_price * (1 - raw_stop_pct * TP_B_PARTIAL_R)
-                tp_b_runner_price = entry_price * (1 - raw_stop_pct * TP_B_RUNNER_R)
-                breakeven_price = entry_price * (1 - self.fee_pct)
+            tranche_risk = t["risk"]  # This is 1R for this tranche
             
             # Calculate position size based on risk
+            # risk_pct = stop_loss_pct + fee_pct
             effective_r_pct = raw_stop_pct + self.fee_pct
-            position_notional = t["risk"] / effective_r_pct
+            position_notional = tranche_risk / effective_r_pct
             
             # Calculate size in base asset and round to step size
             raw_size = position_notional / entry_price
             size = round_to_step(raw_size, step_size)
+            
+            # Recalculate notional with rounded size
+            actual_notional = size * entry_price
+            
+            # Calculate fees (entry + exit)
+            total_fees = 2 * actual_notional * self.fee_pct
+            
+            # Calculate TP prices based on R profit in dollars
+            # For n*R profit: raw_pnl_needed = n * risk + total_fees
+            # price_diff = raw_pnl_needed / size
+            def calc_tp_price(r_mult: float) -> float:
+                raw_pnl_needed = r_mult * tranche_risk + total_fees
+                price_diff = raw_pnl_needed / size if size > 0 else 0
+                if side == "LONG":
+                    return entry_price + price_diff
+                else:  # SHORT
+                    return entry_price - price_diff
+            
+            tp_a_price = calc_tp_price(TP_A_R)
+            tp_b_partial_price = calc_tp_price(TP_B_PARTIAL_R)
+            tp_b_runner_price = calc_tp_price(TP_B_RUNNER_R)
+            
+            # Stop loss and breakeven
+            if side == "LONG":
+                stop_price = entry_price * (1 - raw_stop_pct)
+                breakeven_price = entry_price * (1 + 2 * self.fee_pct)  # Cover round-trip fees
+            else:  # SHORT
+                stop_price = entry_price * (1 + raw_stop_pct)
+                breakeven_price = entry_price * (1 - 2 * self.fee_pct)  # Cover round-trip fees
             
             position = Position(
                 tranche=t["name"],
@@ -234,8 +252,8 @@ class PositionSizer:
                 stop=stop_price,
                 size=size,
                 breakeven=breakeven_price,
-                notional=position_notional,
-                risk=t["risk"],
+                notional=actual_notional,
+                risk=tranche_risk,
                 raw_stop_pct=raw_stop_pct,
                 tp_a=tp_a_price,
                 tp_b_partial=tp_b_partial_price,

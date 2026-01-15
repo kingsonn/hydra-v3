@@ -820,9 +820,18 @@ class TradeManager:
         margin_to_release = tranche.notional * MARGIN_REQUIREMENT
         account = self.db.get_account()
         
+        # Calculate new margin values
+        new_margin_used = max(0, account.margin_used - margin_to_release)
+        
+        # Margin available should be based on current equity minus used margin
+        # Not just adding released margin (which could exceed equity after losses)
+        current_equity = account.initial_equity + account.realized_pnl + account.unrealized_pnl
+        new_margin_available = current_equity - new_margin_used
+        
         self.db.update_account({
-            "margin_used": max(0, account.margin_used - margin_to_release),
-            "margin_available": account.margin_available + margin_to_release,
+            "margin_used": new_margin_used,
+            "margin_available": max(0, new_margin_available),
+            "current_equity": current_equity,
         })
     
     # ========== MANUAL CONTROLS ==========
