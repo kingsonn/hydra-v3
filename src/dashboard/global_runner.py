@@ -295,7 +295,7 @@ class GlobalPipelineRunner:
             self.position_sizer.set_equity(account.current_equity)
             
             # Get percentile from prediction for dynamic risk sizing
-            percentile_300 = prediction.percentile_300 if prediction else None
+            percentile_300 = ml_prediction.percentile_300 if ml_prediction else None
             
             # Calculate position with dynamic risk
             position_result = self.position_sizer.calculate_position(
@@ -664,7 +664,11 @@ class GlobalPipelineRunner:
             ))
         
         try:
-            await asyncio.gather(*tasks)
+            # return_exceptions=True prevents one task failure from crashing others
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error("task_failed", task_index=i, error=str(result))
         except asyncio.CancelledError:
             logger.info("global_pipeline_cancelled")
     
