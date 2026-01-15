@@ -140,13 +140,18 @@ class DerivativesCollector:
         
         logger.info("derivatives_collector_starting", symbols=self.symbols)
         
-        # Run all tasks concurrently
-        await asyncio.gather(
+        # Run all tasks concurrently - return_exceptions prevents one failure from crashing all
+        results = await asyncio.gather(
             self._poll_funding_loop(),
             self._poll_oi_loop(),
             self._liquidations_ws_loop(),
             self._update_buckets_loop(),
+            return_exceptions=True,
         )
+        # Log any task failures
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error("derivatives_task_failed", task_index=i, error=str(result))
     
     async def stop(self) -> None:
         """Stop all collection"""

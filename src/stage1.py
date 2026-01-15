@@ -267,40 +267,46 @@ class Stage1Orchestrator:
     async def _storage_loop(self) -> None:
         """Periodically flush buffers to storage"""
         while self._running:
-            await asyncio.sleep(5)  # Flush every 5 seconds
-            
-            if not self._storage:
-                continue
-            
-            # Flush trades
-            if len(self._trade_buffer) >= self.storage_batch_size:
-                trades_to_store = self._trade_buffer[:self.storage_batch_size]
-                self._trade_buffer = self._trade_buffer[self.storage_batch_size:]
-                await self._storage.store_trades(trades_to_store)
-            
-            # Flush bars
-            if self._bar_buffer:
-                bars_to_store = self._bar_buffer.copy()
-                self._bar_buffer.clear()
-                await self._storage.store_bars(bars_to_store)
+            try:
+                await asyncio.sleep(5)  # Flush every 5 seconds
+                
+                if not self._storage:
+                    continue
+                
+                # Flush trades
+                if len(self._trade_buffer) >= self.storage_batch_size:
+                    trades_to_store = self._trade_buffer[:self.storage_batch_size]
+                    self._trade_buffer = self._trade_buffer[self.storage_batch_size:]
+                    await self._storage.store_trades(trades_to_store)
+                
+                # Flush bars
+                if self._bar_buffer:
+                    bars_to_store = self._bar_buffer.copy()
+                    self._bar_buffer.clear()
+                    await self._storage.store_bars(bars_to_store)
+            except Exception as e:
+                logger.error("storage_loop_error", error=str(e))
     
     async def _profile_loop(self) -> None:
         """Periodically update volume profiles"""
         while self._running:
-            await asyncio.sleep(self.profile_update_interval_s)
-            
-            for symbol in self.symbols:
-                if self._profiler.should_update(symbol):
-                    profiles = self._profiler.update_profiles(symbol)
-                    
-                    # Store profiles and external callback
-                    for profile in profiles.values():
-                        if self._storage:
-                            await self._storage.store_volume_profile(profile)
+            try:
+                await asyncio.sleep(self.profile_update_interval_s)
+                
+                for symbol in self.symbols:
+                    if self._profiler.should_update(symbol):
+                        profiles = self._profiler.update_profiles(symbol)
                         
-                        # External callback (Stage 2)
-                        if self._ext_on_volume_profile:
-                            self._ext_on_volume_profile(profile)
+                        # Store profiles and external callback
+                        for profile in profiles.values():
+                            if self._storage:
+                                await self._storage.store_volume_profile(profile)
+                            
+                            # External callback (Stage 2)
+                            if self._ext_on_volume_profile:
+                                self._ext_on_volume_profile(profile)
+            except Exception as e:
+                logger.error("profile_loop_error", error=str(e))
     
     # ========== PUBLIC API ==========
     

@@ -21,8 +21,5 @@ EnvironmentFile=/home/ubuntu/hydra-v3/.env
 LimitNOFILE=65535
 MemoryMax=4G
 
-# Watchdog - restart if unresponsive for 5 minutes
-WatchdogSec=300
-
 [Install]
 WantedBy=multi-user.target
