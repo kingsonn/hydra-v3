@@ -135,10 +135,20 @@ class StorageManager:
                 
                 # Append to existing file or create new
                 if file_path.exists():
-                    existing_df = pd.read_parquet(file_path)
-                    df = pd.concat([existing_df, df], ignore_index=True)
-                    df = df.drop_duplicates(subset=['trade_id'], keep='last')
-                    df = df.sort_values('timestamp_ms')
+                    try:
+                        existing_df = pd.read_parquet(file_path)
+                        df = pd.concat([existing_df, df], ignore_index=True)
+                        df = df.drop_duplicates(subset=['trade_id'], keep='last')
+                        df = df.sort_values('timestamp_ms')
+                    except Exception as e:
+                        # Corrupted file - delete and start fresh
+                        import structlog
+                        structlog.get_logger().warning(
+                            "corrupted_parquet_deleted",
+                            file=str(file_path),
+                            error=str(e)
+                        )
+                        file_path.unlink(missing_ok=True)
                 
                 df.to_parquet(file_path, index=False, compression='snappy')
                 count += len(trade_list)
@@ -211,10 +221,20 @@ class StorageManager:
                 df = pd.DataFrame([b.to_dict() for b in bar_list])
                 
                 if file_path.exists():
-                    existing_df = pd.read_parquet(file_path)
-                    df = pd.concat([existing_df, df], ignore_index=True)
-                    df = df.drop_duplicates(subset=['timestamp_ms'], keep='last')
-                    df = df.sort_values('timestamp_ms')
+                    try:
+                        existing_df = pd.read_parquet(file_path)
+                        df = pd.concat([existing_df, df], ignore_index=True)
+                        df = df.drop_duplicates(subset=['timestamp_ms'], keep='last')
+                        df = df.sort_values('timestamp_ms')
+                    except Exception as e:
+                        # Corrupted file - delete and start fresh
+                        import structlog
+                        structlog.get_logger().warning(
+                            "corrupted_parquet_deleted",
+                            file=str(file_path),
+                            error=str(e)
+                        )
+                        file_path.unlink(missing_ok=True)
                 
                 df.to_parquet(file_path, index=False, compression='snappy')
                 count += len(bar_list)

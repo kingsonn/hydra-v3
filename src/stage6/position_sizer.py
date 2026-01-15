@@ -29,7 +29,7 @@ MIN_STOP_PCT = 2 * FEE_PCT        # 0.16% - minimum stop distance
 TIGHT_MULT = 1.0                  # Tranche A multiplier
 WIDE_MULT = 1.8                   # Tranche B multiplier
 
-TP_A_R = 1.0                      # Tranche A full TP (1R)
+TP_A_R = 1.5                      # Tranche A full TP (1.5R) - covers fees on tight stops
 TP_B_PARTIAL_R = 2.0              # Tranche B partial TP (2R)
 TP_B_PARTIAL_PCT = 0.4            # % of Tranche B size to close at partial TP
 TP_B_RUNNER_R = 3.0               # Tranche B runner TP (3R)
