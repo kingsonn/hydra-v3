@@ -255,6 +255,31 @@ class MLPredictor:
         """
         result = PredictionResult()
         
+        try:
+            return self._predict_impl(
+                direction, vol_regime, symbol, moi_250ms, moi_1s,
+                delta_velocity, aggression_persistence, absorption_z,
+                dist_lvn, vol_5m, result
+            )
+        except Exception as e:
+            logger.error("predict_fatal_error", symbol=symbol, error=str(e))
+            return result
+    
+    def _predict_impl(
+        self,
+        direction: Direction,
+        vol_regime: str,
+        symbol: str,
+        moi_250ms: float,
+        moi_1s: float,
+        delta_velocity: float,
+        aggression_persistence: float,
+        absorption_z: float,
+        dist_lvn: float,
+        vol_5m: float,
+        result: PredictionResult,
+    ) -> PredictionResult:
+        """Internal prediction implementation"""
         # Get model names
         model_60_name = self._get_model_name(direction, vol_regime, 60)
         model_300_name = self._get_model_name(direction, vol_regime, 300)

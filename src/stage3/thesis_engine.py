@@ -569,34 +569,44 @@ class ThesisEngine:
         """
         symbol = thesis_state.symbol
         
-        prediction = self._ml_predictor.predict(
-            direction=thesis.direction,
-            vol_regime=thesis_state.vol_regime,
-            symbol=symbol,
-            moi_250ms=market_state.order_flow.moi_250ms,
-            moi_1s=market_state.order_flow.moi_1s,
-            delta_velocity=market_state.order_flow.delta_velocity,
-            aggression_persistence=market_state.order_flow.aggression_persistence,
-            absorption_z=market_state.absorption.absorption_z,
-            dist_lvn=market_state.structure.dist_lvn,
-            vol_5m=market_state.volatility.vol_5m,
-        )
-        
-        # Store prediction for transparency
-        self._ml_predictions[symbol] = prediction
-        
-        logger.info(
-            "stage5_ml_prediction",
-            symbol=symbol,
-            direction=thesis.direction.value,
-            vol_regime=thesis_state.vol_regime,
-            pred_60=prediction.pred_60,
-            pred_300=prediction.pred_300,
-            pct_60=prediction.percentile_60,
-            pct_300=prediction.percentile_300,
-        )
-        
-        return prediction
+        try:
+            prediction = self._ml_predictor.predict(
+                direction=thesis.direction,
+                vol_regime=thesis_state.vol_regime,
+                symbol=symbol,
+                moi_250ms=market_state.order_flow.moi_250ms,
+                moi_1s=market_state.order_flow.moi_1s,
+                delta_velocity=market_state.order_flow.delta_velocity,
+                aggression_persistence=market_state.order_flow.aggression_persistence,
+                absorption_z=market_state.absorption.absorption_z,
+                dist_lvn=market_state.structure.dist_lvn,
+                vol_5m=market_state.volatility.vol_5m,
+            )
+            
+            # Store prediction for transparency
+            self._ml_predictions[symbol] = prediction
+            
+            logger.info(
+                "stage5_ml_prediction",
+                symbol=symbol,
+                direction=thesis.direction.value,
+                vol_regime=thesis_state.vol_regime,
+                pred_60=prediction.pred_60,
+                pred_300=prediction.pred_300,
+                pct_60=prediction.percentile_60,
+                pct_300=prediction.percentile_300,
+            )
+            
+            return prediction
+        except Exception as e:
+            logger.error(
+                "ml_prediction_error",
+                symbol=symbol,
+                error=str(e),
+            )
+            # Return empty prediction result instead of crashing
+            from src.stage5.predictor import PredictionResult
+            return PredictionResult()
     
     # ========== PUBLIC API ==========
     

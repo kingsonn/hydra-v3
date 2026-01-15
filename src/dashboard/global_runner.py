@@ -786,7 +786,31 @@ async def run_global_pipeline(
         await runner.stop()
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        logger.error("fatal_pipeline_error", error=str(e))
+        print(f"\n[FATAL ERROR] {e}")
+        await runner.stop()
+
+
+def global_exception_handler(loop, context):
+    """Global exception handler for uncaught exceptions in async tasks"""
+    exception = context.get("exception")
+    message = context.get("message", "Unknown error")
+    logger.error(
+        "uncaught_async_exception",
+        message=message,
+        exception=str(exception) if exception else "None",
+    )
+    # Don't crash - just log and continue
 
 
 if __name__ == "__main__":
-    asyncio.run(run_global_pipeline())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(global_exception_handler)
+    try:
+        loop.run_until_complete(run_global_pipeline())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
