@@ -77,6 +77,9 @@ class OrderBookCollector:
         self._snapshot_buffer: deque[OrderBookSnapshot] = deque(maxlen=100)
         self._last_snapshot_time: Dict[str, float] = {}
         
+        # Message queue for decoupling WS receive from processing
+        self._msg_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5000)
+        
         # Connection state
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
@@ -129,9 +132,9 @@ class OrderBookCollector:
         """Connect and listen for order book updates"""
         async with websockets.connect(
             self.ws_url,
-            ping_interval=30,
-            ping_timeout=20,
-            close_timeout=10,
+            ping_interval=20,      # Relaxed ping interval (Binance-safe)
+            ping_timeout=20,       # Match ping interval
+            close_timeout=5,       # Faster close
             max_size=10_000_000,
             compression=None,
         ) as ws:
@@ -141,14 +144,37 @@ class OrderBookCollector:
             
             logger.info("orderbook_ws_connected")
             
-            async for message in ws:
-                if not self._running:
-                    break
-                self._message_count += 1
+            # Start worker task to process messages from queue
+            worker_task = asyncio.create_task(self._message_worker())
+            
+            try:
+                # WS loop ONLY queues messages - ultra lightweight
+                async for message in ws:
+                    if not self._running:
+                        break
+                    self._message_count += 1
+                    try:
+                        self._msg_queue.put_nowait(message)
+                    except asyncio.QueueFull:
+                        # Drop message if queue full - better than blocking WS
+                        pass
+            finally:
+                worker_task.cancel()
                 try:
-                    await self._process_message(message)
-                except Exception as e:
-                    logger.error("orderbook_process_error", error=str(e))
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+    
+    async def _message_worker(self) -> None:
+        """Worker that processes messages from queue - decoupled from WS receive"""
+        while self._running:
+            try:
+                message = await asyncio.wait_for(self._msg_queue.get(), timeout=1.0)
+                await self._process_message(message)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("orderbook_process_error", error=str(e))
     
     async def _process_message(self, message: str) -> None:
         """Process order book update"""

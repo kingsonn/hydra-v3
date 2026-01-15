@@ -48,6 +48,9 @@ class TradesCollector:
         self._buffer: deque[Trade] = deque(maxlen=buffer_max_size)
         self._batch_buffer: List[Trade] = []
         
+        # Message queue for decoupling WS receive from processing
+        self._msg_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=10000)
+        
         # Connection state
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
@@ -105,9 +108,9 @@ class TradesCollector:
         """Connect to WebSocket and listen for trades"""
         async with websockets.connect(
             self.ws_url,
-            ping_interval=30,      # Send ping every 30s
-            ping_timeout=20,       # Wait 20s for pong
-            close_timeout=10,      # Wait 10s for close
+            ping_interval=20,      # Relaxed ping interval (Binance-safe)
+            ping_timeout=20,       # Match ping interval
+            close_timeout=5,       # Faster close
             max_size=10_000_000,   # 10MB max message size
             compression=None,      # Disable compression for speed
         ) as ws:
@@ -117,15 +120,38 @@ class TradesCollector:
             
             logger.info("trades_ws_connected", url=self.ws_url)
             
-            async for message in ws:
-                if not self._running:
-                    break
-                
-                self._message_count += 1
+            # Start worker task to process messages from queue
+            worker_task = asyncio.create_task(self._message_worker())
+            
+            try:
+                # WS loop ONLY queues messages - ultra lightweight
+                async for message in ws:
+                    if not self._running:
+                        break
+                    
+                    self._message_count += 1
+                    try:
+                        self._msg_queue.put_nowait(message)
+                    except asyncio.QueueFull:
+                        # Drop message if queue full - better than blocking WS
+                        pass
+            finally:
+                worker_task.cancel()
                 try:
-                    await self._process_message(message)
-                except Exception as e:
-                    logger.error("trade_process_error", error=str(e))
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+    
+    async def _message_worker(self) -> None:
+        """Worker that processes messages from queue - decoupled from WS receive"""
+        while self._running:
+            try:
+                message = await asyncio.wait_for(self._msg_queue.get(), timeout=1.0)
+                await self._process_message(message)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("trade_process_error", error=str(e))
     
     async def _process_message(self, message: str) -> None:
         """Process incoming WebSocket message"""

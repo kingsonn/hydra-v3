@@ -106,6 +106,9 @@ class DerivativesCollector:
         # Liquidation tracking with timestamps
         self._liquidations: deque[tuple[int, Liquidation]] = deque(maxlen=10000)
         
+        # Message queue for decoupling WS receive from processing
+        self._liq_msg_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5000)
+        
         # Rolling buckets per symbol (30s, 2m, 5m windows)
         self._liq_buckets: Dict[str, Dict[str, LiquidationBucket]] = {
             s: {
@@ -352,9 +355,9 @@ class DerivativesCollector:
         """Connect to liquidation WebSocket and listen"""
         async with websockets.connect(
             self.liq_ws_url,
-            ping_interval=30,
-            ping_timeout=20,
-            close_timeout=10,
+            ping_interval=20,      # Relaxed ping interval (Binance-safe)
+            ping_timeout=20,       # Match ping interval
+            close_timeout=5,       # Faster close
             max_size=10_000_000,
             compression=None,
         ) as ws:
@@ -363,12 +366,38 @@ class DerivativesCollector:
             
             logger.info("liquidations_ws_connected", url=self.liq_ws_url)
             
-            async for message in ws:
-                if not self._running:
-                    break
-                
-                self._liq_message_count += 1
+            # Start worker task to process messages from queue
+            worker_task = asyncio.create_task(self._liq_message_worker())
+            
+            try:
+                # WS loop ONLY queues messages - ultra lightweight
+                async for message in ws:
+                    if not self._running:
+                        break
+                    
+                    self._liq_message_count += 1
+                    try:
+                        self._liq_msg_queue.put_nowait(message)
+                    except asyncio.QueueFull:
+                        # Drop message if queue full - better than blocking WS
+                        pass
+            finally:
+                worker_task.cancel()
+                try:
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+    
+    async def _liq_message_worker(self) -> None:
+        """Worker that processes liquidation messages from queue"""
+        while self._running:
+            try:
+                message = await asyncio.wait_for(self._liq_msg_queue.get(), timeout=1.0)
                 await self._process_liquidation_message(message)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("liquidation_process_error", error=str(e))
     
     async def _process_liquidation_message(self, message: str) -> None:
         """Process liquidation WebSocket message"""
