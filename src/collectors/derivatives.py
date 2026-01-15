@@ -135,7 +135,8 @@ class DerivativesCollector:
         self._running = True
         self._client = httpx.AsyncClient(
             base_url=settings.BINANCE_REST_BASE,
-            timeout=10.0,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
         
         logger.info("derivatives_collector_starting", symbols=self.symbols)
@@ -179,7 +180,11 @@ class DerivativesCollector:
         """Fetch current funding rates for all symbols"""
         rates = []
         
-        for symbol in self.symbols:
+        for i, symbol in enumerate(self.symbols):
+            # Small delay between requests to avoid rate limiting
+            if i > 0:
+                await asyncio.sleep(0.1)
+            
             try:
                 self._request_count += 1
                 resp = await self._client.get(
@@ -208,8 +213,12 @@ class DerivativesCollector:
                         if self.on_funding:
                             await self._safe_callback(self.on_funding, rate)
             
+            except httpx.TimeoutException:
+                logger.warning("funding_fetch_timeout", symbol=symbol)
+            except httpx.HTTPStatusError as e:
+                logger.warning("funding_fetch_http_error", symbol=symbol, status=e.response.status_code)
             except Exception as e:
-                logger.warning("funding_fetch_error", symbol=symbol, error=str(e))
+                logger.warning("funding_fetch_error", symbol=symbol, error=f"{type(e).__name__}: {e}")
         
         return rates
     
@@ -253,7 +262,11 @@ class DerivativesCollector:
         """Fetch current open interest for all symbols"""
         oi_list = []
         
-        for symbol in self.symbols:
+        for i, symbol in enumerate(self.symbols):
+            # Small delay between requests to avoid rate limiting
+            if i > 0:
+                await asyncio.sleep(0.1)
+            
             try:
                 self._request_count += 1
                 resp = await self._client.get(
@@ -277,8 +290,12 @@ class DerivativesCollector:
                 if self.on_oi:
                     await self._safe_callback(self.on_oi, oi)
             
+            except httpx.TimeoutException:
+                logger.warning("oi_fetch_timeout", symbol=symbol)
+            except httpx.HTTPStatusError as e:
+                logger.warning("oi_fetch_http_error", symbol=symbol, status=e.response.status_code)
             except Exception as e:
-                logger.warning("oi_fetch_error", symbol=symbol, error=str(e))
+                logger.warning("oi_fetch_error", symbol=symbol, error=f"{type(e).__name__}: {e}")
         
         return oi_list
     
