@@ -164,15 +164,28 @@ class Stage1Orchestrator:
         self._running = False
         logger.info("stage1_stopping")
         
-        # Stop collectors
+        # Stop collectors first (sets their _running = False)
         await self._trades_collector.stop()
         await self._orderbook_collector.stop()
         await self._derivatives_collector.stop()
         await self._health_monitor.stop()
         
-        # Cancel tasks
+        # Cancel tasks and wait for them to finish
         for task in self._tasks:
-            task.cancel()
+            if not task.done():
+                task.cancel()
+        
+        # Wait for all tasks with timeout
+        if self._tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("stage1_stop_timeout", pending_tasks=len([t for t in self._tasks if not t.done()]))
+            except Exception as e:
+                logger.warning("stage1_stop_error", error=str(e))
         
         # Flush remaining data
         if self._bar_aggregator:

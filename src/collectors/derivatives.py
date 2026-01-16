@@ -158,12 +158,25 @@ class DerivativesCollector:
                 logger.error("derivatives_task_failed", task_index=i, error=str(result))
     
     async def stop(self) -> None:
-        """Stop all collection"""
+        """Stop all collection gracefully"""
         self._running = False
+        
+        # Close HTTP client
         if self._client:
-            await self._client.aclose()
+            try:
+                await asyncio.wait_for(self._client.aclose(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        self._client = None
+        
+        # Close WebSocket
         if self._liq_ws:
-            await self._liq_ws.close()
+            try:
+                await asyncio.wait_for(self._liq_ws.close(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        self._liq_ws = None
+        
         logger.info("derivatives_collector_stopped")
     
     # ========== FUNDING RATES ==========

@@ -98,10 +98,14 @@ class TradesCollector:
                 await asyncio.sleep(delay)
     
     async def stop(self) -> None:
-        """Stop the trades collector"""
+        """Stop the trades collector gracefully"""
         self._running = False
         if self._ws:
-            await self._ws.close()
+            try:
+                await asyncio.wait_for(self._ws.close(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                pass  # Best effort close
+        self._ws = None
         logger.info("trades_collector_stopped")
     
     async def _connect_and_listen(self) -> None:

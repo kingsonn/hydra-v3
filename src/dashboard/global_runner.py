@@ -678,10 +678,28 @@ class GlobalPipelineRunner:
             logger.info("global_pipeline_cancelled")
     
     async def stop(self) -> None:
-        """Stop all components"""
+        """Stop all components gracefully"""
+        if not self._running:
+            return
+        
         self._running = False
-        await self.stage1.stop()
-        await self.stage2.stop()
+        logger.info("global_pipeline_stopping")
+        
+        try:
+            # Stop stages with timeout
+            await asyncio.wait_for(self.stage1.stop(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("stage1_stop_timeout")
+        except Exception as e:
+            logger.warning("stage1_stop_error", error=str(e))
+        
+        try:
+            await asyncio.wait_for(self.stage2.stop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("stage2_stop_timeout")
+        except Exception as e:
+            logger.warning("stage2_stop_error", error=str(e))
+        
         logger.info("global_pipeline_stopped")
     
     # ========== PUBLIC API ==========
@@ -822,4 +840,15 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     finally:
+        # Cancel all pending tasks before closing
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        
+        # Wait for cancellation with timeout
+        if pending:
+            loop.run_until_complete(
+                asyncio.wait(pending, timeout=5.0)
+            )
+        
         loop.close()
