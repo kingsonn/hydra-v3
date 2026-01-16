@@ -351,9 +351,22 @@ class DerivativesCollector:
                 await self._connect_and_listen_liquidations()
                 self._consecutive_errors = 0
             except (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK) as e:
+                if not self._running:
+                    break
                 self._consecutive_errors += 1
                 logger.warning("liquidations_ws_disconnected", reason=str(e), consecutive=self._consecutive_errors)
+            except (GeneratorExit, asyncio.CancelledError):
+                # Graceful shutdown
+                break
+            except RuntimeError as e:
+                if "no running event loop" in str(e) or "Event loop is closed" in str(e):
+                    break  # Event loop closed, exit gracefully
+                self._error_count += 1
+                self._consecutive_errors += 1
+                logger.error("liquidations_ws_error", error=str(e), consecutive=self._consecutive_errors)
             except Exception as e:
+                if not self._running:
+                    break
                 self._error_count += 1
                 self._consecutive_errors += 1
                 logger.error("liquidations_ws_error", error=str(e), consecutive=self._consecutive_errors)
@@ -362,7 +375,10 @@ class DerivativesCollector:
                 jitter = random.uniform(0.5, 1.5)
                 delay = min(self._reconnect_delay * (2 ** min(self._consecutive_errors - 1, 5)) * jitter, self._max_reconnect_delay)
                 logger.info("liquidations_reconnecting", delay_s=f"{delay:.1f}")
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.sleep(delay)
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
     
     async def _connect_and_listen_liquidations(self) -> None:
         """Connect to liquidation WebSocket and listen"""
@@ -394,11 +410,17 @@ class DerivativesCollector:
                     except asyncio.QueueFull:
                         # Drop message if queue full - better than blocking WS
                         pass
+            except GeneratorExit:
+                # Graceful shutdown - generator closed externally
+                pass
+            except asyncio.CancelledError:
+                # Task cancelled
+                pass
             finally:
                 worker_task.cancel()
                 try:
                     await worker_task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, GeneratorExit, RuntimeError):
                     pass
     
     async def _liq_message_worker(self) -> None:
