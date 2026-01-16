@@ -17,6 +17,10 @@ import structlog
 
 from config import settings
 from src.core.models import FundingRate, OpenInterest, Liquidation, Side
+from src.core.resilience import (
+    get_supervisor, AdaptiveBackoff, WebSocketConfig,
+    CircuitState
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -125,22 +129,40 @@ class DerivativesCollector:
         self._liq_ws: Optional[websockets.WebSocketClientProtocol] = None
         self._last_funding_time: Dict[str, int] = {}
         
+        # Resilience components
+        self._backoff = AdaptiveBackoff(base_delay_s=1.0, max_delay_s=60.0)
+        self._ws_config = WebSocketConfig(
+            ping_interval=30.0,
+            ping_timeout=30.0,
+            close_timeout=10.0,
+        )
+        self._supervisor = get_supervisor()
+        self._conn_name = "liquidations_ws"
+        self._rest_conn_name = "rest_api"
+        
         # Health
         self._request_count = 0
         self._error_count = 0
         self._liq_message_count = 0
-        self._reconnect_delay = 1.0
-        self._max_reconnect_delay = 30.0
         self._consecutive_errors = 0
+        self._last_liq_message_time: float = 0
+        
+        # HTTP client refresh (recreate every 2 hours to avoid stale connections)
+        self._client_created_time: float = 0
+        self._max_client_age_s = 2 * 3600  # 2 hours
+        
+        # WS periodic refresh
+        self._liq_connection_time: float = 0
+        self._max_ws_age_s = 12 * 3600  # 12 hours
     
     async def start(self) -> None:
         """Start all data collection tasks"""
         self._running = True
-        self._client = httpx.AsyncClient(
-            base_url=settings.BINANCE_REST_BASE,
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
+        await self._ensure_http_client()
+        
+        # Register with supervisor
+        self._supervisor.register_connection(self._conn_name)
+        self._supervisor.register_connection(self._rest_conn_name)
         
         logger.info("derivatives_collector_starting", symbols=self.symbols)
         
@@ -150,12 +172,49 @@ class DerivativesCollector:
             self._poll_oi_loop(),
             self._liquidations_ws_loop(),
             self._update_buckets_loop(),
+            self._http_client_refresh_loop(),
             return_exceptions=True,
         )
         # Log any task failures
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error("derivatives_task_failed", task_index=i, error=str(result))
+                logger.error("derivatives_task_failed", task_index=i, error=str(result)[:100])
+    
+    async def _ensure_http_client(self) -> None:
+        """Ensure HTTP client exists and is fresh"""
+        now = time.time()
+        needs_refresh = (
+            self._client is None or
+            now - self._client_created_time > self._max_client_age_s
+        )
+        
+        if needs_refresh:
+            # Close old client
+            if self._client:
+                try:
+                    await asyncio.wait_for(self._client.aclose(), timeout=5.0)
+                except Exception:
+                    pass
+            
+            # Create new client
+            self._client = httpx.AsyncClient(
+                base_url=settings.BINANCE_REST_BASE,
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            self._client_created_time = now
+            logger.debug("http_client_refreshed")
+    
+    async def _http_client_refresh_loop(self) -> None:
+        """Periodically refresh HTTP client to avoid stale connections"""
+        while self._running:
+            try:
+                await asyncio.sleep(self._max_client_age_s / 2)  # Check at half the max age
+                await self._ensure_http_client()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("http_client_refresh_error", error=str(e)[:50])
     
     async def stop(self) -> None:
         """Stop all collection gracefully"""
@@ -347,33 +406,59 @@ class DerivativesCollector:
     async def _liquidations_ws_loop(self) -> None:
         """WebSocket loop for liquidation events with robust reconnection"""
         while self._running:
+            # Check circuit breaker
+            circuit = self._supervisor.get_circuit(self._conn_name)
+            if circuit and circuit.state == CircuitState.OPEN:
+                logger.debug("liquidations_circuit_open", waiting_s=30)
+                await asyncio.sleep(30)
+                continue
+            
             try:
                 await self._connect_and_listen_liquidations()
                 self._consecutive_errors = 0
+                self._backoff.record_success()
             except (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK) as e:
                 if not self._running:
                     break
                 self._consecutive_errors += 1
-                logger.warning("liquidations_ws_disconnected", reason=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                reason = str(e)[:100]
+                logger.warning("liquidations_ws_disconnected", reason=reason, consecutive=self._consecutive_errors)
+            except asyncio.TimeoutError:
+                if not self._running:
+                    break
+                self._consecutive_errors += 1
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.warning("liquidations_connect_timeout", consecutive=self._consecutive_errors)
             except (GeneratorExit, asyncio.CancelledError):
-                # Graceful shutdown
                 break
             except RuntimeError as e:
                 if "no running event loop" in str(e) or "Event loop is closed" in str(e):
-                    break  # Event loop closed, exit gracefully
+                    break
                 self._error_count += 1
                 self._consecutive_errors += 1
-                logger.error("liquidations_ws_error", error=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.error("liquidations_ws_error", error=str(e)[:100], consecutive=self._consecutive_errors)
             except Exception as e:
                 if not self._running:
                     break
                 self._error_count += 1
                 self._consecutive_errors += 1
-                logger.error("liquidations_ws_error", error=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.error("liquidations_ws_error", error=str(e)[:100], consecutive=self._consecutive_errors)
             
             if self._running:
-                jitter = random.uniform(0.5, 1.5)
-                delay = min(self._reconnect_delay * (2 ** min(self._consecutive_errors - 1, 5)) * jitter, self._max_reconnect_delay)
+                # Check if supervisor allows reconnection
+                if not self._supervisor.should_reconnect(self._conn_name):
+                    logger.info("liquidations_reconnect_paused")
+                    await asyncio.sleep(30)
+                    continue
+                
+                delay = self._backoff.get_delay()
                 logger.info("liquidations_reconnecting", delay_s=f"{delay:.1f}")
                 try:
                     await asyncio.sleep(delay)
@@ -382,21 +467,27 @@ class DerivativesCollector:
     
     async def _connect_and_listen_liquidations(self) -> None:
         """Connect to liquidation WebSocket and listen"""
-        async with websockets.connect(
-            self.liq_ws_url,
-            ping_interval=20,      # Relaxed ping interval (Binance-safe)
-            ping_timeout=20,       # Match ping interval
-            close_timeout=5,       # Faster close
-            max_size=10_000_000,
-            compression=None,
-        ) as ws:
+        # Use timeout for connection
+        async with asyncio.timeout(self._ws_config.connect_timeout):
+            ws = await websockets.connect(
+                self.liq_ws_url,
+                **self._ws_config.to_kwargs(),
+            )
+        
+        async with ws:
             self._liq_ws = ws
             self._consecutive_errors = 0
+            self._liq_connection_time = time.time()
+            self._backoff.reset()
             
-            logger.info("liquidations_ws_connected", url=self.liq_ws_url)
+            # Notify supervisor
+            self._supervisor.record_connect(self._conn_name)
             
-            # Start worker task to process messages from queue
+            logger.info("liquidations_ws_connected")
+            
+            # Start worker task and health checker
             worker_task = asyncio.create_task(self._liq_message_worker())
+            health_task = asyncio.create_task(self._liq_health_loop())
             
             try:
                 # WS loop ONLY queues messages - ultra lightweight
@@ -405,22 +496,34 @@ class DerivativesCollector:
                         break
                     
                     self._liq_message_count += 1
+                    self._last_liq_message_time = time.time()
+                    self._supervisor.record_message(self._conn_name)
+                    
                     try:
                         self._liq_msg_queue.put_nowait(message)
                     except asyncio.QueueFull:
-                        # Drop message if queue full - better than blocking WS
-                        pass
+                        try:
+                            self._liq_msg_queue.get_nowait()
+                            self._liq_msg_queue.put_nowait(message)
+                        except asyncio.QueueEmpty:
+                            pass
+                    
+                    # Check if connection is too old
+                    if time.time() - self._liq_connection_time > self._max_ws_age_s:
+                        logger.info("liquidations_connection_refresh", age_hours=self._max_ws_age_s/3600)
+                        break
+                        
             except GeneratorExit:
-                # Graceful shutdown - generator closed externally
                 pass
             except asyncio.CancelledError:
-                # Task cancelled
                 pass
             finally:
+                self._supervisor.record_disconnect(self._conn_name)
                 worker_task.cancel()
+                health_task.cancel()
                 try:
-                    await worker_task
-                except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+                    await asyncio.gather(worker_task, health_task, return_exceptions=True)
+                except Exception:
                     pass
     
     async def _liq_message_worker(self) -> None:
@@ -431,8 +534,34 @@ class DerivativesCollector:
                 await self._process_liquidation_message(message)
             except asyncio.TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error("liquidation_process_error", error=str(e))
+                logger.error("liquidation_process_error", error=str(e)[:100])
+    
+    async def _liq_health_loop(self) -> None:
+        """Monitor liquidation connection health"""
+        while self._running:
+            try:
+                await asyncio.sleep(60)  # Check every 60 seconds (liquidations are sparse)
+                
+                # For liquidations, silence is normal - only check if WS seems dead
+                # We use ping/pong for that, but also check extreme silence
+                silence = time.time() - self._last_liq_message_time if self._last_liq_message_time else 0
+                
+                # If we had messages before but now 10+ minutes of silence, might be dead
+                if self._last_liq_message_time > 0 and silence > 600:
+                    # Only force reconnect if we're past connection refresh time anyway
+                    if time.time() - self._liq_connection_time > self._max_ws_age_s / 2:
+                        logger.warning("liquidations_long_silence", silence_s=f"{silence:.0f}")
+                        if self._liq_ws:
+                            await self._liq_ws.close(1000, "health_check_refresh")
+                        break
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("liquidations_health_check_error", error=str(e)[:50])
     
     async def _process_liquidation_message(self, message: str) -> None:
         """Process liquidation WebSocket message"""

@@ -16,6 +16,10 @@ import structlog
 
 from config import settings
 from src.core.models import OrderBookSnapshot, OrderBookLevel
+from src.core.resilience import (
+    get_supervisor, AdaptiveBackoff, WebSocketConfig,
+    CircuitState
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -83,15 +87,27 @@ class OrderBookCollector:
         # Connection state
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
-        self._reconnect_delay = 1.0
-        self._max_reconnect_delay = 30.0
         self._consecutive_errors = 0
+        
+        # Resilience components
+        self._backoff = AdaptiveBackoff(base_delay_s=1.0, max_delay_s=60.0)
+        self._ws_config = WebSocketConfig(
+            ping_interval=30.0,
+            ping_timeout=30.0,
+            close_timeout=10.0,
+        )
+        self._supervisor = get_supervisor()
+        self._conn_name = "orderbook_ws"
         
         # Health metrics
         self._last_update_time: Dict[str, int] = {}
         self._update_count: Dict[str, int] = {s.upper(): 0 for s in self.symbols}
         self._connection_time: Optional[float] = None
         self._message_count = 0
+        self._last_message_time: float = 0
+        
+        # Periodic refresh (reconnect every 12 hours for stability)
+        self._max_connection_age_s = 12 * 3600  # 12 hours
     
     @property
     def ws_url(self) -> str:
@@ -104,32 +120,61 @@ class OrderBookCollector:
         self._running = True
         logger.info("orderbook_collector_starting", symbols=self.symbols)
         
+        # Register with supervisor
+        self._supervisor.register_connection(self._conn_name)
+        
         while self._running:
+            # Check circuit breaker
+            circuit = self._supervisor.get_circuit(self._conn_name)
+            if circuit and circuit.state == CircuitState.OPEN:
+                logger.debug("orderbook_circuit_open", waiting_s=30)
+                await asyncio.sleep(30)
+                continue
+            
             try:
                 await self._connect_and_listen()
                 self._consecutive_errors = 0
+                self._backoff.record_success()
             except (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK) as e:
                 if not self._running:
                     break
                 self._consecutive_errors += 1
-                logger.warning("orderbook_ws_disconnected", reason=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                reason = str(e)[:100]  # Truncate for logging
+                logger.warning("orderbook_ws_disconnected", reason=reason, consecutive=self._consecutive_errors)
+            except asyncio.TimeoutError:
+                if not self._running:
+                    break
+                self._consecutive_errors += 1
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.warning("orderbook_connect_timeout", consecutive=self._consecutive_errors)
             except (GeneratorExit, asyncio.CancelledError):
-                # Graceful shutdown
                 break
             except RuntimeError as e:
                 if "no running event loop" in str(e) or "Event loop is closed" in str(e):
-                    break  # Event loop closed, exit gracefully
+                    break
                 self._consecutive_errors += 1
-                logger.error("orderbook_collector_error", error=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.error("orderbook_collector_error", error=str(e)[:100], consecutive=self._consecutive_errors)
             except Exception as e:
                 if not self._running:
                     break
                 self._consecutive_errors += 1
-                logger.error("orderbook_collector_error", error=str(e), consecutive=self._consecutive_errors)
+                self._backoff.record_failure()
+                self._supervisor.record_error(self._conn_name)
+                logger.error("orderbook_collector_error", error=str(e)[:100], consecutive=self._consecutive_errors)
             
             if self._running:
-                jitter = random.uniform(0.5, 1.5)
-                delay = min(self._reconnect_delay * (2 ** min(self._consecutive_errors - 1, 5)) * jitter, self._max_reconnect_delay)
+                # Check if supervisor allows reconnection
+                if not self._supervisor.should_reconnect(self._conn_name):
+                    logger.info("orderbook_reconnect_paused")
+                    await asyncio.sleep(30)
+                    continue
+                
+                delay = self._backoff.get_delay()
                 logger.info("orderbook_reconnecting", delay_s=f"{delay:.1f}")
                 try:
                     await asyncio.sleep(delay)
@@ -149,45 +194,64 @@ class OrderBookCollector:
     
     async def _connect_and_listen(self) -> None:
         """Connect and listen for order book updates"""
-        async with websockets.connect(
-            self.ws_url,
-            ping_interval=20,      # Relaxed ping interval (Binance-safe)
-            ping_timeout=20,       # Match ping interval
-            close_timeout=5,       # Faster close
-            max_size=10_000_000,
-            compression=None,
-        ) as ws:
+        # Use timeout for connection
+        async with asyncio.timeout(self._ws_config.connect_timeout):
+            ws = await websockets.connect(
+                self.ws_url,
+                **self._ws_config.to_kwargs(),
+            )
+        
+        async with ws:
             self._ws = ws
             self._connection_time = time.time()
             self._consecutive_errors = 0
+            self._backoff.reset()
+            
+            # Notify supervisor
+            self._supervisor.record_connect(self._conn_name)
             
             logger.info("orderbook_ws_connected")
             
-            # Start worker task to process messages from queue
+            # Start worker task and health checker
             worker_task = asyncio.create_task(self._message_worker())
+            health_task = asyncio.create_task(self._connection_health_loop())
             
             try:
                 # WS loop ONLY queues messages - ultra lightweight
                 async for message in ws:
                     if not self._running:
                         break
+                    
                     self._message_count += 1
+                    self._last_message_time = time.time()
+                    self._supervisor.record_message(self._conn_name)
+                    
                     try:
                         self._msg_queue.put_nowait(message)
                     except asyncio.QueueFull:
-                        # Drop message if queue full - better than blocking WS
-                        pass
+                        # Drop oldest and add new (prefer fresh data)
+                        try:
+                            self._msg_queue.get_nowait()
+                            self._msg_queue.put_nowait(message)
+                        except asyncio.QueueEmpty:
+                            pass
+                    
+                    # Check if connection is too old (periodic refresh)
+                    if time.time() - self._connection_time > self._max_connection_age_s:
+                        logger.info("orderbook_connection_refresh", age_hours=self._max_connection_age_s/3600)
+                        break
+                        
             except GeneratorExit:
-                # Graceful shutdown - generator closed externally
                 pass
             except asyncio.CancelledError:
-                # Task cancelled
                 pass
             finally:
+                self._supervisor.record_disconnect(self._conn_name)
                 worker_task.cancel()
+                health_task.cancel()
                 try:
-                    await worker_task
-                except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+                    await asyncio.gather(worker_task, health_task, return_exceptions=True)
+                except Exception:
                     pass
     
     async def _message_worker(self) -> None:
@@ -198,8 +262,30 @@ class OrderBookCollector:
                 await self._process_message(message)
             except asyncio.TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error("orderbook_process_error", error=str(e))
+                logger.error("orderbook_process_error", error=str(e)[:100])
+    
+    async def _connection_health_loop(self) -> None:
+        """Monitor connection health and force reconnect if needed"""
+        while self._running:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                # Check for message silence (connection might be dead)
+                silence = time.time() - self._last_message_time if self._last_message_time else 0
+                if silence > 60:  # 60 seconds of silence
+                    logger.warning("orderbook_connection_silent", silence_s=f"{silence:.1f}")
+                    # Force close to trigger reconnect
+                    if self._ws:
+                        await self._ws.close(1000, "health_check_timeout")
+                    break
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("orderbook_health_check_error", error=str(e)[:50])
     
     async def _process_message(self, message: str) -> None:
         """Process order book update"""

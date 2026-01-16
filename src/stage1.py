@@ -10,6 +10,7 @@ import structlog
 from config import settings
 from src.core.models import Trade, Bar, OrderBookSnapshot, FundingRate, OpenInterest, Liquidation
 from src.core.storage import StorageManager, get_storage
+from src.core.resilience import get_supervisor, init_resilience, ConnectionSupervisor
 from src.collectors.trades import TradesCollector
 from src.collectors.orderbook import OrderBookCollector
 from src.collectors.derivatives import DerivativesCollector
@@ -71,6 +72,7 @@ class Stage1Orchestrator:
         self._profiler: Optional[RollingVolumeProfiler] = None
         self._health_monitor: Optional[HealthMonitor] = None
         self._storage: Optional[StorageManager] = None
+        self._supervisor: Optional[ConnectionSupervisor] = None
         
         # Buffers for batch storage
         self._trade_buffer: List[Trade] = []
@@ -84,10 +86,18 @@ class Stage1Orchestrator:
         self._start_time: Optional[float] = None
         self._trades_processed = 0
         self._bars_completed = 0
+        
+        # Watchdog settings
+        self._watchdog_interval_s = 60  # Check every minute
+        self._max_restart_attempts = 3
+        self._restart_cooldown_s = 300  # 5 minutes between restart attempts
     
     async def initialize(self) -> None:
         """Initialize all components"""
         logger.info("stage1_initializing", symbols=self.symbols)
+        
+        # Initialize resilience system
+        self._supervisor = await init_resilience()
         
         # Storage
         if self.enable_storage:
@@ -97,6 +107,12 @@ class Stage1Orchestrator:
         self._health_monitor = HealthMonitor(
             symbols=self.symbols,
             on_alert=self._on_health_alert,
+        )
+        
+        # Register recovery callback for auto-recovery
+        self._health_monitor.register_recovery_callback(
+            "collector_restart",
+            self._on_recovery_triggered
         )
         
         # Bar aggregator
@@ -146,12 +162,14 @@ class Stage1Orchestrator:
         
         # Start all collectors as background tasks
         self._tasks = [
-            asyncio.create_task(self._trades_collector.start()),
-            asyncio.create_task(self._orderbook_collector.start()),
-            asyncio.create_task(self._derivatives_collector.start()),
-            asyncio.create_task(self._health_monitor.start()),
-            asyncio.create_task(self._storage_loop()),
-            asyncio.create_task(self._profile_loop()),
+            asyncio.create_task(self._trades_collector.start(), name="trades_collector"),
+            asyncio.create_task(self._orderbook_collector.start(), name="orderbook_collector"),
+            asyncio.create_task(self._derivatives_collector.start(), name="derivatives_collector"),
+            asyncio.create_task(self._health_monitor.start(), name="health_monitor"),
+            asyncio.create_task(self._supervisor.start(), name="supervisor"),
+            asyncio.create_task(self._storage_loop(), name="storage_loop"),
+            asyncio.create_task(self._profile_loop(), name="profile_loop"),
+            asyncio.create_task(self._watchdog_loop(), name="watchdog"),
         ]
         
         logger.info("stage1_started", task_count=len(self._tasks))
@@ -169,6 +187,7 @@ class Stage1Orchestrator:
         await self._orderbook_collector.stop()
         await self._derivatives_collector.stop()
         await self._health_monitor.stop()
+        await self._supervisor.stop()
         
         # Cancel tasks and wait for them to finish
         for task in self._tasks:
@@ -272,8 +291,14 @@ class Stage1Orchestrator:
             self._ext_on_liquidation(liq)
     
     async def _on_health_alert(self, alert: str) -> None:
-        """Handle health alert"""
-        logger.warning("health_alert", alert=alert)
+        """Handle health alert - already logged by health monitor"""
+        pass  # Alert is already logged by health monitor, avoid duplicate
+    
+    async def _on_recovery_triggered(self, unhealthy_symbols: List[str]) -> None:
+        """Handle auto-recovery trigger from health monitor"""
+        logger.info("stage1_recovery_triggered", unhealthy_symbols=unhealthy_symbols)
+        # The supervisor handles connection-level recovery
+        # Here we can add application-level recovery if needed
     
     # ========== BACKGROUND LOOPS ==========
     
@@ -318,8 +343,100 @@ class Stage1Orchestrator:
                             # External callback (Stage 2)
                             if self._ext_on_volume_profile:
                                 self._ext_on_volume_profile(profile)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error("profile_loop_error", error=str(e))
+                logger.error("profile_loop_error", error=str(e)[:100])
+    
+    async def _watchdog_loop(self) -> None:
+        """Watchdog that monitors task health and restarts failed tasks"""
+        restart_times: Dict[str, float] = {}  # Track restart times per task
+        restart_counts: Dict[str, int] = {}   # Track restart counts
+        
+        while self._running:
+            try:
+                await asyncio.sleep(self._watchdog_interval_s)
+                
+                now = time.time()
+                
+                # Check all tasks
+                for task in self._tasks:
+                    if task.done() and not task.cancelled():
+                        task_name = task.get_name()
+                        
+                        # Get exception if any
+                        try:
+                            exc = task.exception()
+                            if exc:
+                                logger.error("watchdog_task_failed", 
+                                           task=task_name, 
+                                           error=str(exc)[:100])
+                        except asyncio.CancelledError:
+                            continue
+                        
+                        # Check restart cooldown
+                        last_restart = restart_times.get(task_name, 0)
+                        count = restart_counts.get(task_name, 0)
+                        
+                        if count >= self._max_restart_attempts:
+                            if now - last_restart > self._restart_cooldown_s:
+                                # Reset after cooldown
+                                restart_counts[task_name] = 0
+                            else:
+                                logger.warning("watchdog_max_restarts", 
+                                             task=task_name,
+                                             cooldown_remaining=self._restart_cooldown_s - (now - last_restart))
+                                continue
+                        
+                        # Restart the task
+                        logger.info("watchdog_restarting_task", task=task_name)
+                        new_task = await self._restart_task(task_name)
+                        if new_task:
+                            # Replace in task list
+                            idx = self._tasks.index(task)
+                            self._tasks[idx] = new_task
+                            restart_times[task_name] = now
+                            restart_counts[task_name] = count + 1
+                
+                # Log watchdog heartbeat periodically
+                uptime = now - self._start_time if self._start_time else 0
+                if int(uptime) % 3600 < self._watchdog_interval_s:  # Every hour
+                    logger.info("watchdog_heartbeat",
+                              uptime_hours=f"{uptime/3600:.1f}",
+                              trades_processed=self._trades_processed,
+                              bars_completed=self._bars_completed)
+                              
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("watchdog_error", error=str(e)[:100])
+    
+    async def _restart_task(self, task_name: str) -> Optional[asyncio.Task]:
+        """Restart a specific task by name"""
+        try:
+            if task_name == "trades_collector":
+                return asyncio.create_task(self._trades_collector.start(), name=task_name)
+            elif task_name == "orderbook_collector":
+                return asyncio.create_task(self._orderbook_collector.start(), name=task_name)
+            elif task_name == "derivatives_collector":
+                return asyncio.create_task(self._derivatives_collector.start(), name=task_name)
+            elif task_name == "health_monitor":
+                return asyncio.create_task(self._health_monitor.start(), name=task_name)
+            elif task_name == "supervisor":
+                return asyncio.create_task(self._supervisor.start(), name=task_name)
+            elif task_name == "storage_loop":
+                return asyncio.create_task(self._storage_loop(), name=task_name)
+            elif task_name == "profile_loop":
+                return asyncio.create_task(self._profile_loop(), name=task_name)
+            elif task_name == "watchdog":
+                # Don't restart watchdog from within watchdog
+                return None
+            else:
+                logger.warning("watchdog_unknown_task", task=task_name)
+                return None
+        except Exception as e:
+            logger.error("watchdog_restart_failed", task=task_name, error=str(e)[:50])
+            return None
     
     # ========== PUBLIC API ==========
     

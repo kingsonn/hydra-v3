@@ -11,6 +11,7 @@ from collections import deque
 import structlog
 
 from config import settings
+from src.core.resilience import get_supervisor
 
 logger = structlog.get_logger(__name__)
 
@@ -129,14 +130,22 @@ class HealthMonitor:
             s: deque(maxlen=100) for s in self.symbols
         }
         
-        # Alert history
+        # Alert history (deduplicated)
         self._alerts: deque = deque(maxlen=100)
         self._alert_cooldown: Dict[str, float] = {}
         self._alert_cooldown_seconds = 300  # 5 minutes between same alert type
+        self._emitted_this_cycle: set = set()  # Prevent duplicates within single check cycle
+        
+        # Resilience integration
+        self._supervisor = get_supervisor()
+        
+        # Auto-recovery callbacks
+        self._recovery_callbacks: Dict[str, Callable] = {}
         
         # State
         self._running = False
         self._last_check = 0
+        self._consecutive_unhealthy = 0  # Track consecutive unhealthy checks
         
         # Per-pair stale thresholds (ms) - higher for low volume pairs
         self._stale_thresholds: Dict[str, int] = {
@@ -155,13 +164,20 @@ class HealthMonitor:
         """Get stale threshold for symbol based on expected volume"""
         return self._stale_thresholds.get(symbol, self._default_stale_threshold)
     
+    def register_recovery_callback(self, name: str, callback: Callable) -> None:
+        """Register a callback for auto-recovery actions"""
+        self._recovery_callbacks[name] = callback
+    
     async def start(self) -> None:
         """Start health monitoring loop"""
         self._running = True
         logger.info("health_monitor_starting")
         
         while self._running:
-            await self._check_health()
+            try:
+                await self._check_health()
+            except Exception as e:
+                logger.error("health_check_error", error=str(e)[:100])
             await asyncio.sleep(self.check_interval_s)
     
     async def stop(self) -> None:
@@ -217,6 +233,9 @@ class HealthMonitor:
         now_ms = int(time.time() * 1000)
         now = time.time()
         alerts = []
+        
+        # Reset per-cycle dedup set
+        self._emitted_this_cycle.clear()
         
         # Update rates
         for symbol in self.symbols:
@@ -278,13 +297,24 @@ class HealthMonitor:
         
         # Determine overall status
         overall_status = HealthStatus.HEALTHY
-        for symbol_health in self._symbols.values():
+        unhealthy_symbols = []
+        for symbol, symbol_health in self._symbols.items():
             sym_status = symbol_health.get_status(self.max_lag_ms)
             if sym_status == HealthStatus.UNHEALTHY:
                 overall_status = HealthStatus.UNHEALTHY
-                break
+                unhealthy_symbols.append(symbol)
             elif sym_status == HealthStatus.DEGRADED and overall_status == HealthStatus.HEALTHY:
                 overall_status = HealthStatus.DEGRADED
+        
+        # Track consecutive unhealthy states for auto-recovery
+        if overall_status == HealthStatus.UNHEALTHY:
+            self._consecutive_unhealthy += 1
+            
+            # Trigger auto-recovery after sustained unhealthy period
+            if self._consecutive_unhealthy >= 3:  # 15 seconds (3 * 5s check interval)
+                await self._trigger_recovery(unhealthy_symbols)
+        else:
+            self._consecutive_unhealthy = 0
         
         self._last_check = now
         
@@ -301,11 +331,16 @@ class HealthMonitor:
         now = time.time()
         key = alert_key or alert
         
+        # Prevent duplicate alerts within the same check cycle
+        if key in self._emitted_this_cycle:
+            return False
+        
         # Check cooldown (don't spam same alert type)
         last_alert_time = self._alert_cooldown.get(key, 0)
         if now - last_alert_time < self._alert_cooldown_seconds:
             return False
         
+        self._emitted_this_cycle.add(key)
         self._alert_cooldown[key] = now
         self._alerts.append((now, alert))
         
@@ -317,9 +352,28 @@ class HealthMonitor:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                logger.error("alert_callback_error", error=str(e))
+                logger.error("alert_callback_error", error=str(e)[:50])
         
         return True
+    
+    async def _trigger_recovery(self, unhealthy_symbols: List[str]) -> None:
+        """Trigger auto-recovery actions for unhealthy state"""
+        logger.warning("health_triggering_recovery", 
+                      unhealthy_symbols=unhealthy_symbols,
+                      consecutive_checks=self._consecutive_unhealthy)
+        
+        # Reset consecutive counter to avoid repeated triggers
+        self._consecutive_unhealthy = 0
+        
+        # Invoke registered recovery callbacks
+        for name, callback in self._recovery_callbacks.items():
+            try:
+                result = callback(unhealthy_symbols)
+                if asyncio.iscoroutine(result):
+                    await result
+                logger.info("recovery_callback_executed", callback=name)
+            except Exception as e:
+                logger.error("recovery_callback_error", callback=name, error=str(e)[:50])
     
     # ========== PUBLIC API ==========
     
