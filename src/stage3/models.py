@@ -90,11 +90,16 @@ class ThesisState:
     funding_z: float = 0.0
     
     # OI
+    oi_delta_1m: float = 0.0
     oi_delta_5m: float = 0.0
     oi_delta_15m: float = 0.0
     
     # Liquidations
-    liq_imbalance: float = 0.0
+    liq_imbalance: float = 0.0  # 2m imbalance (legacy)
+    liq_imbalance_30s: float = 0.0
+    liq_imbalance_2m: float = 0.0
+    cascade_active: bool = False
+    liq_exhaustion: bool = False
     
     # Price changes
     price_change_5m: float = 0.0
@@ -121,9 +126,15 @@ class ThesisState:
     # Order flow (for inventory lock signal)
     moi_1s: float = 0.0          # Raw MOI for direction detection
     moi_z: float = 0.0           # |moi_1s| / moi_std
+    moi_std: float = 0.0         # Rolling std of MOI
+    delta_velocity: float = 0.0  # Raw delta velocity
     delta_vel_z: float = 0.0     # |delta_velocity| / moi_std
+    moi_flip_rate: float = 0.0   # Sign flips per minute
     flip_noise: float = 0.0      # moi_flip_rate / aggression_persistence
     aggression_persistence: float = 0.0
+    
+    # Absorption extras
+    depth_imbalance: float = 0.0  # (bid - ask) / total
     
     # Volatility (for location gate)
     vol_expansion_ratio: float = 0.0
@@ -137,9 +148,14 @@ class ThesisState:
             "price": self.price,
             "regime": self.regime,
             "funding_z": self.funding_z,
+            "oi_delta_1m": self.oi_delta_1m,
             "oi_delta_5m": self.oi_delta_5m,
             "oi_delta_15m": self.oi_delta_15m,
             "liq_imbalance": self.liq_imbalance,
+            "liq_imbalance_30s": self.liq_imbalance_30s,
+            "liq_imbalance_2m": self.liq_imbalance_2m,
+            "cascade_active": self.cascade_active,
+            "liq_exhaustion": self.liq_exhaustion,
             "price_change_5m": self.price_change_5m,
             "price_change_15m": self.price_change_15m,
             "vol_regime": self.vol_regime,
@@ -154,9 +170,13 @@ class ThesisState:
             "val": self.val,
             "moi_1s": self.moi_1s,
             "moi_z": self.moi_z,
+            "moi_std": self.moi_std,
+            "delta_velocity": self.delta_velocity,
             "delta_vel_z": self.delta_vel_z,
+            "moi_flip_rate": self.moi_flip_rate,
             "flip_noise": self.flip_noise,
             "aggression_persistence": self.aggression_persistence,
+            "depth_imbalance": self.depth_imbalance,
             "vol_expansion_ratio": self.vol_expansion_ratio,
             "acceptance_outside_value": self.acceptance_outside_value,
         }

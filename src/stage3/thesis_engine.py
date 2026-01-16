@@ -11,16 +11,18 @@ import structlog
 from src.stage2.models import MarketState, Regime
 from src.stage3.models import Signal, Thesis, Direction, ThesisState
 from src.stage3.processors.signals import (
-    funding_squeeze,
-    liquidation_exhaustion,
-    oi_divergence,
-    crowding_fade,
-    funding_carry,
+    funding_price_cointegration,
+    hawkes_liquidation_cascade,
+    kyle_lambda_divergence,
     inventory_lock,
     failed_acceptance_reversal,
+    queue_reactive_liquidity,
+    liquidity_crisis_detector,
+    flip_rate_compression_break,
+    order_flow_dominance_decay,
 )
 from src.stage4.filter import StructuralFilter, FilterResult, orderflow_confirmation
-from src.stage5.predictor import MLPredictor, PredictionResult
+from src.stage5.predictor_v2 import MLPredictorV2, PredictionResult
 
 # Percentile threshold for Stage 5 gate (top 20% = >= 80)
 PERCENTILE_300_THRESHOLD = 85.0
@@ -156,8 +158,8 @@ class ThesisEngine:
         # Stage 4 structural filter
         self._structural_filter = StructuralFilter()
         
-        # Stage 5 ML predictor
-        self._ml_predictor = MLPredictor()
+        # Stage 5 ML predictor (V2 with enhanced features)
+        self._ml_predictor = MLPredictorV2(use_v2_features=True)
         
         # Current thesis per symbol
         self._theses: Dict[str, Thesis] = {}
@@ -264,9 +266,14 @@ class ThesisEngine:
             price=state.price,
             regime=state.regime.value,
             funding_z=state.funding.funding_z,
+            oi_delta_1m=state.oi.oi_delta_1m,
             oi_delta_5m=state.oi.oi_delta_5m,
             oi_delta_15m=state.oi.oi_delta_5m,  # Use 5m for now, TODO: add 15m to Stage 2
             liq_imbalance=state.liquidations.imbalance_2m,
+            liq_imbalance_30s=state.liquidations.imbalance_30s,
+            liq_imbalance_2m=state.liquidations.imbalance_2m,
+            cascade_active=state.liquidations.cascade_active,
+            liq_exhaustion=state.liquidations.exhaustion,
             price_change_5m=price_change_5m,
             price_change_15m=price_change_15m,
             vol_regime=state.volatility.vol_regime,
@@ -281,12 +288,17 @@ class ThesisEngine:
             dist_poc=state.structure.dist_poc,
             vah=state.structure.vah,
             val=state.structure.val,
-            # Order flow for inventory lock signal
+            # Order flow
             moi_1s=state.order_flow.moi_1s,
             moi_z=moi_z,
+            moi_std=state.order_flow.moi_std,
+            delta_velocity=state.order_flow.delta_velocity,
             delta_vel_z=delta_vel_z,
+            moi_flip_rate=state.order_flow.moi_flip_rate,
             flip_noise=flip_noise,
             aggression_persistence=state.order_flow.aggression_persistence,
+            # Absorption extras
+            depth_imbalance=state.absorption.depth_imbalance,
             vol_expansion_ratio=state.volatility.vol_expansion_ratio,
             # Structure for FAR signal
             acceptance_outside_value=state.structure.acceptance_outside_value,
@@ -327,46 +339,54 @@ class ThesisEngine:
                 veto_reason=f"Extreme funding ({state.funding_z:.2f}) in expansion - no fade",
             )
         
-        # ========== COLLECT SIGNALS (with double-counting prevention) ==========
+        # ========== COLLECT SIGNALS ==========
         
         signals: List[Signal] = []
         
-        # Signal 1: Funding squeeze
-        fs = funding_squeeze(state)
-        if fs:
-            signals.append(fs)
+        # Signal 1: Funding-Price Cointegration (S-tier)
+        fpc = funding_price_cointegration(state)
+        if fpc:
+            signals.append(fpc)
         
-        # Signal 2: Liquidation exhaustion
-        le = liquidation_exhaustion(state)
-        if le:
-            signals.append(le)
+        # Signal 2: Hawkes Liquidation Cascade (S-tier)
+        hlc = hawkes_liquidation_cascade(state)
+        if hlc:
+            signals.append(hlc)
         
-        # Signal 3: OI divergence
-        oi = oi_divergence(state)
-        if oi:
-            signals.append(oi)
+        # Signal 3: Kyle's Lambda Divergence (B-tier)
+        kld = kyle_lambda_divergence(state)
+        if kld:
+            signals.append(kld)
         
-        # Signal 4: Crowding fade (only if funding squeeze didn't fire)
-        # This prevents double-counting funding signals
-        if not fs:
-            cf = crowding_fade(state)
-            if cf:
-                signals.append(cf)
-        
-        # Signal 5: Funding carry
-        fc = funding_carry(state)
-        if fc:
-            signals.append(fc)
-        
-        # Signal 6: Inventory lock (ILI)
+        # Signal 4: Inventory Lock (ILI)
         ili = inventory_lock(state)
         if ili:
             signals.append(ili)
         
-        # Signal 7: Failed Acceptance Reversal (FAR)
+        # Signal 5: Failed Acceptance Reversal (FAR)
         far = failed_acceptance_reversal(state)
         if far:
             signals.append(far)
+        
+        # Signal 6: Queue Reactive Liquidity (S-tier)
+        qrl = queue_reactive_liquidity(state)
+        if qrl:
+            signals.append(qrl)
+        
+        # Signal 7: Liquidity Crisis Detector (A-tier)
+        lcd = liquidity_crisis_detector(state)
+        if lcd:
+            signals.append(lcd)
+        
+        # Signal 8: Flip-Rate Compression Break (A-S tier)
+        frcb = flip_rate_compression_break(state)
+        if frcb:
+            signals.append(frcb)
+        
+        # Signal 9: Order-Flow Dominance Decay (S-tier)
+        ofdd = order_flow_dominance_decay(state)
+        if ofdd:
+            signals.append(ofdd)
         
         # Log all detected signals
         # if signals:
@@ -570,10 +590,20 @@ class ThesisEngine:
         symbol = thesis_state.symbol
         
         try:
+            # Get hour and weekend for time features
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc)
+            hour = now.hour
+            is_weekend = now.weekday() >= 5
+            
+            # Calculate ATR for normalization
+            atr_5m = market_state.volatility.atr_5m if market_state.volatility.atr_5m > 0 else 1.0
+            
             prediction = self._ml_predictor.predict(
                 direction=thesis.direction,
                 vol_regime=thesis_state.vol_regime,
                 symbol=symbol,
+                # V1 features (backward compatible)
                 moi_250ms=market_state.order_flow.moi_250ms,
                 moi_1s=market_state.order_flow.moi_1s,
                 delta_velocity=market_state.order_flow.delta_velocity,
@@ -581,6 +611,18 @@ class ThesisEngine:
                 absorption_z=market_state.absorption.absorption_z,
                 dist_lvn=market_state.structure.dist_lvn,
                 vol_5m=market_state.volatility.vol_5m,
+                # V2 additional features
+                moi_5s=market_state.order_flow.moi_1s * 5,  # Approximate 5s MOI
+                dist_poc=market_state.structure.dist_poc,
+                atr_5m=atr_5m,
+                hour=hour,
+                is_weekend=is_weekend,
+                # State update inputs (for rolling calculations)
+                absorption_raw=market_state.absorption.absorption_z,  # Use z as proxy
+                price_impact=1.0 / (market_state.absorption.absorption_z + 1e-6) if market_state.absorption.absorption_z != 0 else 0.0,
+                trade_count=market_state.order_flow.moi_flip_rate,  # Approximate
+                ret=thesis_state.price_change_5m / 100.0 if thesis_state.price_change_5m else 0.0,
+                signed_qty=market_state.order_flow.moi_1s,
             )
             
             # Store prediction for transparency
@@ -605,7 +647,7 @@ class ThesisEngine:
                 error=str(e),
             )
             # Return empty prediction result instead of crashing
-            from src.stage5.predictor import PredictionResult
+            from src.stage5.predictor_v2 import PredictionResult
             return PredictionResult()
     
     # ========== PUBLIC API ==========

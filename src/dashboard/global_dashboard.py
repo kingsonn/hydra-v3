@@ -1108,12 +1108,12 @@ DASHBOARD_HTML = """
                 // Calculate totals
                 const totalUnrealizedPnl = tranches.reduce((sum, t) => sum + (t.unrealized_pnl || 0), 0);
                 const totalRealizedPnl = tranches.reduce((sum, t) => sum + (t.realized_pnl || 0), 0);
-                const avgR = tranches.reduce((sum, t) => sum + (t.r_multiple || 0), 0) / tranches.length;
+                const totalR = tranches.reduce((sum, t) => sum + (t.r_multiple || 0), 0);
                 const currentPrice = tranches[0].current_price || 0;
                 const entryPrice = tranches[0].entry_price || 0;
                 
                 const pnlColor = totalUnrealizedPnl >= 0 ? '#00ff88' : '#ff4444';
-                const rColor = avgR >= 0 ? '#00ff88' : '#ff4444';
+                const rColor = totalR >= 0 ? '#00ff88' : '#ff4444';
                 
                 html += `
                     <div class="position-item ${isShort ? 'short' : ''}">
@@ -1127,7 +1127,7 @@ DASHBOARD_HTML = """
                         <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; margin: 4px 0;">
                             <span>Entry: $${formatPrice(entryPrice)}</span>
                             <span>Current: $${formatPrice(currentPrice)}</span>
-                            <span style="color: ${rColor}; font-weight: 600;">${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R</span>
+                            <span style="color: ${rColor}; font-weight: 600;">${totalR >= 0 ? '+' : ''}${totalR.toFixed(2)}R</span>
                         </div>
                         <div class="position-signal">Signal: ${tranches[0].signal_name || 'N/A'}</div>
                         
@@ -1270,6 +1270,9 @@ DASHBOARD_HTML = """
                         <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: #888;">
                             <span>${t.side} ${t.tranche}</span>
                             <span style="color: ${rColor}">${t.r_multiple >= 0 ? '+' : ''}${t.r_multiple.toFixed(2)}R</span>
+                        </div>
+                        <div style="font-size: 0.65rem; color: #7c3aed; margin-top: 2px;">
+                            Signal: ${t.signal_name || 'N/A'}
                         </div>
                         <div style="font-size: 0.65rem; color: #666; margin-top: 2px;">
                             ${t.close_reason} • ${t.closed_at ? t.closed_at.split('T')[1]?.split('.')[0] || '' : ''}

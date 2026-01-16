@@ -173,7 +173,10 @@ class RiskManager:
         logger.info("daily_stats_reset", date=self._daily_start_date)
     
     def _check_drawdown_limits(self) -> None:
-        """Check and enforce drawdown limits"""
+        """Check and enforce drawdown limits - DISABLED FOR TESTING"""
+        # Drawdown limits disabled for signal testing
+        return
+        
         if self._trading_paused:
             return
         

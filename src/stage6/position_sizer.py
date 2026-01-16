@@ -207,8 +207,8 @@ class PositionSizer:
             tranche_risk = t["risk"]  # This is 1R for this tranche
             
             # Calculate position size based on risk
-            # risk_pct = stop_loss_pct + fee_pct
-            effective_r_pct = raw_stop_pct + self.fee_pct
+            # risk_pct = stop_loss_pct + 2*fee_pct (round-trip fees: entry + exit)
+            effective_r_pct = raw_stop_pct + 2 * self.fee_pct
             position_notional = tranche_risk / effective_r_pct
             
             # Calculate size in base asset and round to step size
