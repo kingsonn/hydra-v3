@@ -4,12 +4,17 @@ Hydra Global Pipeline Entry Point
 Proper signal handling for systemd service
 """
 import asyncio
+import os
 import signal
 import sys
+from pathlib import Path
+
+# Add project root to path (works with absolute paths)
+PROJECT_ROOT = Path(__file__).parent.resolve()
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(PROJECT_ROOT)  # Ensure working directory is correct
+
 import structlog
-
-sys.path.insert(0, ".")
-
 from src.dashboard.global_runner import run_global_pipeline
 
 logger = structlog.get_logger(__name__)
