@@ -24,10 +24,10 @@ from config import settings
 from src.stage1 import Stage1Orchestrator
 from src.stage2.orchestrator import Stage2Orchestrator
 from src.stage2.models import MarketState, Regime
-from src.stage3.thesis_engine import ThesisEngine, PERCENTILE_300_THRESHOLD
+from src.stage3.thesis_engine import ThesisEngine, PROB_MIN_THRESHOLD
 from src.stage3.models import Thesis, Direction
 from src.stage4.filter import FilterResult
-from src.stage5.predictor import PredictionResult
+from src.stage5.predictor_v3 import PredictionResultV3
 from src.stage6.position_sizer import PositionSizer
 from src.stage6.models import PositionResult
 from src.stage7.trade_manager import TradeManager
@@ -241,10 +241,12 @@ class GlobalPipelineRunner:
                 stage45_pass = False
                 stage45_reason = "unknown"
         
-        # Stage 5 status - only pass if ML prediction exists and percentile is good
+        # Stage 5 status - only pass if both probabilities meet minimum threshold
         stage5_pass = False
         if ml_prediction and stage45_pass:
-            stage5_pass = ml_prediction.percentile_300 >= PERCENTILE_300_THRESHOLD
+            prob_60_ok = ml_prediction.prob_60 >= PROB_MIN_THRESHOLD
+            prob_300_ok = ml_prediction.prob_300 >= PROB_MIN_THRESHOLD
+            stage5_pass = prob_60_ok and prob_300_ok
         
         # Final trade status
         is_trade = thesis.allowed and stage5_pass
@@ -294,8 +296,9 @@ class GlobalPipelineRunner:
             account = self.trade_manager.get_account_state()
             self.position_sizer.set_equity(account.current_equity)
             
-            # Get percentile from prediction for dynamic risk sizing
-            percentile_300 = ml_prediction.percentile_300 if ml_prediction else None
+            # Get probabilities from prediction for dynamic risk sizing
+            prob_60 = ml_prediction.prob_60 if ml_prediction else None
+            prob_300 = ml_prediction.prob_300 if ml_prediction else None
             
             # Calculate position with dynamic risk
             position_result = self.position_sizer.calculate_position(
@@ -306,7 +309,8 @@ class GlobalPipelineRunner:
                 atr_1h_pct=atr_1h_pct,
                 signal_name=signal_name,
                 current_price=state.price,
-                percentile_300=percentile_300,
+                prob_60=prob_60,
+                prob_300=prob_300,
             )
             
             stage6_pass = position_result.allowed
@@ -517,10 +521,10 @@ class GlobalPipelineRunner:
             "stage45_pass": stage45_pass,
             "stage45_reason": stage45_reason,
             
-            # ===== STAGE 5: ML Prediction (only shown when Stage 4.5 passes) =====
+            # ===== STAGE 5: ML Prediction V3 (probability-based) =====
             "stage5_pass": stage5_pass,
-            "pred_60": ml_prediction.pred_60 if (ml_prediction and stage45_pass) else 0.0,
-            "pred_300": ml_prediction.pred_300 if (ml_prediction and stage45_pass) else 0.0,
+            "prob_60": ml_prediction.prob_60 if (ml_prediction and stage45_pass) else 0.0,
+            "prob_300": ml_prediction.prob_300 if (ml_prediction and stage45_pass) else 0.0,
             "percentile_60": ml_prediction.percentile_60 if (ml_prediction and stage45_pass) else 0.0,
             "percentile_300": ml_prediction.percentile_300 if (ml_prediction and stage45_pass) else 0.0,
             "model_used": ml_prediction.model_300 if (ml_prediction and stage45_pass) else "",
@@ -556,8 +560,8 @@ class GlobalPipelineRunner:
                 "direction": thesis.direction.value,
                 "price": state.price,
                 "time": ps["trade_time"],
-                "percentile_60": ps["percentile_60"],
-                "percentile_300": ps["percentile_300"],
+                "prob_60": ps["prob_60"],
+                "prob_300": ps["prob_300"],
                 "strength": thesis.strength,
                 "signals": ps["signal_reasons"],
             }
@@ -580,7 +584,7 @@ class GlobalPipelineRunner:
                 symbol=symbol,
                 direction=thesis.direction.value,
                 price=state.price,
-                pct_300=ps["percentile_300"],
+                prob_300=f"{ps['prob_300']:.1%}",
                 signal=position_result.signal_name,
                 tranche_a_size=position_result.positions[0].size if position_result.positions else 0,
                 tranche_b_size=position_result.positions[1].size if len(position_result.positions) > 1 else 0,
@@ -722,7 +726,7 @@ class GlobalPipelineRunner:
                     "direction": ps.get("trade_direction", ""),
                     "price": ps.get("trade_price", 0.0),
                     "time": ps.get("trade_time", ""),
-                    "percentile_300": ps.get("percentile_300", 0.0),
+                    "prob_300": ps.get("prob_300", 0.0),
                 })
         return trades
     
@@ -794,7 +798,7 @@ async def run_global_pipeline(
     print("  Stage 3: Signal Detection (Thesis Generation)")
     print("  Stage 4: Structural Location Filter")
     print("  Stage 4.5: Orderflow Confirmation")
-    print("  Stage 5: ML Prediction (percentile_300 >= 80%)")
+    print("  Stage 5: ML Prediction V3 (prob_60 >= 50% AND prob_300 >= 50%)")
     print("  Stage 6: Position Sizing (2 tranches with SL/TP)")
     print(f"")
     print(f"Press Ctrl+C to stop")

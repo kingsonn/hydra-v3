@@ -91,10 +91,10 @@ class PipelineState:
     stage45_pass: bool = False
     stage45_reason: str = ""
     
-    # Stage 5: ML Prediction
+    # Stage 5: ML Prediction V3 (probability-based)
     stage5_pass: bool = False
-    pred_60: float = 0.0
-    pred_300: float = 0.0
+    prob_60: float = 0.0  # Probability of TP hit in 60s
+    prob_300: float = 0.0  # Probability of TP hit in 300s
     percentile_60: float = 0.0
     percentile_300: float = 0.0
     model_used: str = ""
@@ -148,8 +148,8 @@ class PipelineState:
             "stage45_reason": self.stage45_reason,
             # Stage 5
             "stage5_pass": self.stage5_pass,
-            "pred_60": self.pred_60,
-            "pred_300": self.pred_300,
+            "prob_60": self.prob_60,
+            "prob_300": self.prob_300,
             "percentile_60": self.percentile_60,
             "percentile_300": self.percentile_300,
             "model_used": self.model_used,

@@ -3,6 +3,7 @@ Stage 3 Thesis Engine
 Signal stacking and directional bias generation
 """
 import time
+import numpy as np
 from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass
@@ -22,10 +23,12 @@ from src.stage3.processors.signals import (
     order_flow_dominance_decay,
 )
 from src.stage4.filter import StructuralFilter, FilterResult, orderflow_confirmation
-from src.stage5.predictor_v2 import MLPredictorV2, PredictionResult
+from src.stage5.predictor_v3 import MLPredictorV3, PredictionResultV3
+from src.utils.meta_logger import log_signal_event
 
-# Percentile threshold for Stage 5 gate (top 20% = >= 80)
-PERCENTILE_300_THRESHOLD = 85.0
+# Probability threshold for Stage 5 gate (V3 models output probability of TP hit)
+# Minimum probability to allow a trade - 50% = break-even threshold
+PROB_MIN_THRESHOLD = 0.50  # Both prob_60 and prob_300 must be >= 50%
 
 logger = structlog.get_logger(__name__)
 
@@ -158,8 +161,8 @@ class ThesisEngine:
         # Stage 4 structural filter
         self._structural_filter = StructuralFilter()
         
-        # Stage 5 ML predictor (V2 with enhanced features)
-        self._ml_predictor = MLPredictorV2(use_v2_features=True)
+        # Stage 5 ML predictor (V3 with probability-based classification)
+        self._ml_predictor = MLPredictorV3()
         
         # Current thesis per symbol
         self._theses: Dict[str, Thesis] = {}
@@ -168,7 +171,7 @@ class ThesisEngine:
         self._filter_results: Dict[str, FilterResult] = {}
         
         # Last ML prediction per symbol (for transparency)
-        self._ml_predictions: Dict[str, PredictionResult] = {}
+        self._ml_predictions: Dict[str, PredictionResultV3] = {}
         
         # Orderflow filter details per symbol (for transparency)
         self._orderflow_details: Dict[str, Dict] = {}
@@ -216,15 +219,28 @@ class ThesisEngine:
         if thesis.allowed and thesis.direction != Direction.NONE:
             prediction = self._run_ml_prediction(thesis, thesis_state, state)
             
-            # Gate: Only continue if percentile_300 is in top 20%
-            if prediction and prediction.percentile_300 < PERCENTILE_300_THRESHOLD:
-                thesis = Thesis(
-                    allowed=False,
-                    direction=thesis.direction,
-                    strength=thesis.strength,
-                    reasons=thesis.reasons,
-                    veto_reason=f"Stage 5: percentile_300 ({prediction.percentile_300:.1f}%) < {PERCENTILE_300_THRESHOLD}%",
-                )
+            # Gate: Require minimum probability on both horizons
+            # No percentile gate for now (no historical data yet)
+            if prediction:
+                prob_60_ok = prediction.prob_60 >= PROB_MIN_THRESHOLD
+                prob_300_ok = prediction.prob_300 >= PROB_MIN_THRESHOLD
+                
+                if not prob_60_ok:
+                    thesis = Thesis(
+                        allowed=False,
+                        direction=thesis.direction,
+                        strength=thesis.strength,
+                        reasons=thesis.reasons,
+                        veto_reason=f"Stage 5: prob_60 ({prediction.prob_60:.1%}) < {PROB_MIN_THRESHOLD:.0%}",
+                    )
+                elif not prob_300_ok:
+                    thesis = Thesis(
+                        allowed=False,
+                        direction=thesis.direction,
+                        strength=thesis.strength,
+                        reasons=thesis.reasons,
+                        veto_reason=f"Stage 5: prob_300 ({prediction.prob_300:.1%}) < {PROB_MIN_THRESHOLD:.0%}",
+                    )
         
         # Store and callback
         self._theses[symbol] = thesis
@@ -581,63 +597,126 @@ class ThesisEngine:
         thesis: Thesis,
         thesis_state: ThesisState,
         market_state: MarketState,
-    ) -> Optional[PredictionResult]:
+    ) -> Optional[PredictionResultV3]:
         """
         Run Stage 5 ML predictions for a signal that passed Stage 4.5.
         
-        Returns prediction result for percentile gating.
+        V3 uses probability-based classification models.
+        Returns prediction result for probability + percentile gating.
         """
         symbol = thesis_state.symbol
         
         try:
-            # Get hour and weekend for time features
+            # Build features dict for V3 predictor
+            # V3 expects features from update_bar(), but we can build them from MarketState
             import datetime
             now = datetime.datetime.now(datetime.timezone.utc)
-            hour = now.hour
-            is_weekend = now.weekday() >= 5
             
-            # Calculate ATR for normalization
             atr_5m = market_state.volatility.atr_5m if market_state.volatility.atr_5m > 0 else 1.0
+            moi_std = market_state.order_flow.moi_std + 1e-9
+            
+            features = {
+                # Order flow
+                "MOI_250ms": market_state.order_flow.moi_250ms,
+                "MOI_1s": market_state.order_flow.moi_1s,
+                "MOI_5s": market_state.order_flow.moi_1s * 5,  # Approximate
+                "MOI_20s": market_state.order_flow.moi_1s * 20,  # Approximate
+                "MOI_z": abs(market_state.order_flow.moi_1s) / moi_std,
+                "MOI_std": moi_std,
+                "delta_velocity": market_state.order_flow.delta_velocity,
+                "delta_velocity_5s": market_state.order_flow.delta_velocity * 5,
+                "AggressionPersistence": market_state.order_flow.aggression_persistence,
+                
+                # Momentum
+                "MOI_roc_1s": 0.0,  # Would need history
+                "MOI_roc_5s": 0.0,
+                "MOI_acceleration": 0.0,
+                "MOI_flip_rate": market_state.order_flow.moi_flip_rate,
+                
+                # Volatility
+                "vol_1m": market_state.volatility.vol_5m,  # Approximate
+                "vol_5m": market_state.volatility.vol_5m,
+                "vol_ratio": market_state.volatility.vol_expansion_ratio,
+                "vol_rank": market_state.volatility.vol_rank,
+                "ATR_5m": atr_5m,
+                "ATR_5m_pct": atr_5m / market_state.price if market_state.price > 0 else 0,
+                
+                # Absorption
+                "absorption_z": market_state.absorption.absorption_z,
+                "price_impact_z": 0.0,  # Would need computation
+                
+                # Structure
+                "dist_poc": market_state.structure.dist_poc,
+                "dist_lvn": market_state.structure.dist_lvn,
+                "dist_poc_atr": market_state.structure.dist_poc / atr_5m if atr_5m > 0 else 0,
+                "dist_lvn_atr": market_state.structure.dist_lvn / atr_5m if atr_5m > 0 else 0,
+                
+                # Trade intensity
+                "trade_intensity": 0.0,
+                "trade_intensity_z": 0.0,
+                
+                # Cumulative
+                "cum_delta_1m": market_state.order_flow.moi_1s * 240,  # Approximate
+                "cum_delta_5m": market_state.order_flow.moi_1s * 1200,
+                
+                # Time
+                "hour_sin": np.sin(2 * np.pi * now.hour / 24),
+                "hour_cos": np.cos(2 * np.pi * now.hour / 24),
+                "is_weekend": 1 if now.weekday() >= 5 else 0,
+            }
             
             prediction = self._ml_predictor.predict(
                 direction=thesis.direction,
                 vol_regime=thesis_state.vol_regime,
                 symbol=symbol,
-                # V1 features (backward compatible)
-                moi_250ms=market_state.order_flow.moi_250ms,
-                moi_1s=market_state.order_flow.moi_1s,
-                delta_velocity=market_state.order_flow.delta_velocity,
-                aggression_persistence=market_state.order_flow.aggression_persistence,
-                absorption_z=market_state.absorption.absorption_z,
-                dist_lvn=market_state.structure.dist_lvn,
-                vol_5m=market_state.volatility.vol_5m,
-                # V2 additional features
-                moi_5s=market_state.order_flow.moi_1s * 5,  # Approximate 5s MOI
-                dist_poc=market_state.structure.dist_poc,
-                atr_5m=atr_5m,
-                hour=hour,
-                is_weekend=is_weekend,
-                # State update inputs (for rolling calculations)
-                absorption_raw=market_state.absorption.absorption_z,  # Use z as proxy
-                price_impact=1.0 / (market_state.absorption.absorption_z + 1e-6) if market_state.absorption.absorption_z != 0 else 0.0,
-                trade_count=market_state.order_flow.moi_flip_rate,  # Approximate
-                ret=thesis_state.price_change_5m / 100.0 if thesis_state.price_change_5m else 0.0,
-                signed_qty=market_state.order_flow.moi_1s,
+                features=features,
             )
             
             # Store prediction for transparency
             self._ml_predictions[symbol] = prediction
             
             logger.info(
-                "stage5_ml_prediction",
+                "stage5_ml_prediction_v3",
                 symbol=symbol,
                 direction=thesis.direction.value,
                 vol_regime=thesis_state.vol_regime,
-                pred_60=prediction.pred_60,
-                pred_300=prediction.pred_300,
+                prob_60=f"{prediction.prob_60:.1%}",
+                prob_300=f"{prediction.prob_300:.1%}",
                 pct_60=prediction.percentile_60,
                 pct_300=prediction.percentile_300,
+                model=prediction.model_300,
             )
+            
+            # Log to meta.json for future model building
+            passed_gate = prediction.prob_60 >= PROB_MIN_THRESHOLD and prediction.prob_300 >= PROB_MIN_THRESHOLD
+            risk_tier = None
+            if passed_gate:
+                # Determine risk tier based on probabilities
+                if prediction.prob_60 >= 0.65 and prediction.prob_300 >= 0.65:
+                    risk_tier = "max"
+                elif (prediction.prob_60 >= 0.65 and prediction.prob_300 >= 0.55) or \
+                     (prediction.prob_60 >= 0.55 and prediction.prob_300 >= 0.65):
+                    risk_tier = "med"
+                else:
+                    risk_tier = "min"
+            
+            try:
+                log_signal_event(
+                    symbol=symbol,
+                    direction=thesis.direction.value,
+                    signal_names=[s.name for s in thesis.reasons] if thesis.reasons else [],
+                    vol_regime=thesis_state.vol_regime,
+                    prob_60=prediction.prob_60,
+                    prob_300=prediction.prob_300,
+                    model_60=prediction.model_60,
+                    model_300=prediction.model_300,
+                    features=features,
+                    price=market_state.price,
+                    passed_gate=passed_gate,
+                    risk_tier=risk_tier,
+                )
+            except Exception as log_err:
+                logger.warning("meta_log_failed", error=str(log_err))
             
             return prediction
         except Exception as e:
@@ -646,9 +725,7 @@ class ThesisEngine:
                 symbol=symbol,
                 error=str(e),
             )
-            # Return empty prediction result instead of crashing
-            from src.stage5.predictor_v2 import PredictionResult
-            return PredictionResult()
+            return PredictionResultV3()
     
     # ========== PUBLIC API ==========
     
@@ -668,7 +745,7 @@ class ThesisEngine:
         """Get Stage 4 filter statistics"""
         return self._structural_filter.get_stats()
     
-    def get_ml_prediction(self, symbol: str) -> Optional[PredictionResult]:
+    def get_ml_prediction(self, symbol: str) -> Optional[PredictionResultV3]:
         """Get last Stage 5 ML prediction for symbol"""
         return self._ml_predictions.get(symbol)
     
@@ -676,7 +753,7 @@ class ThesisEngine:
         """Get last Stage 4.5 orderflow filter details for symbol"""
         return self._orderflow_details.get(symbol)
     
-    def get_all_ml_predictions(self) -> Dict[str, PredictionResult]:
+    def get_all_ml_predictions(self) -> Dict[str, PredictionResultV3]:
         """Get all ML predictions"""
         return self._ml_predictions.copy()
     

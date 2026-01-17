@@ -36,14 +36,15 @@ TP_B_RUNNER_R = 3.0               # Tranche B runner TP (3R)
 
 DEFAULT_TOTAL_RISK = 12.0         # Default fallback risk in USD
 
-# Dynamic risk based on percentile thresholds
-RISK_NORMAL_PCT = 0.015           # 1.5% at percentile >= 85
-RISK_HIGH_EDGE_PCT = 0.025        # 2.5% at percentile >= 92
-RISK_MAX_PCT = 0.030              # 3.0% at percentile >= 96
+# Dynamic risk based on probability thresholds (V3 models)
+# prob_60 and prob_300 are probabilities of TP hit (0-1)
+RISK_MIN_PCT = 0.010              # 1.0% - both probs >= 50%
+RISK_MED_PCT = 0.025              # 2.5% - one >= 65%, other >= 55%
+RISK_MAX_PCT = 0.030              # 3.0% - both probs >= 65%
 
-PERCENTILE_NORMAL = 85.0
-PERCENTILE_HIGH_EDGE = 92.0
-PERCENTILE_MAX = 96.0
+PROB_HIGH = 0.65                  # High confidence threshold
+PROB_MED = 0.55                   # Medium confidence threshold
+PROB_MIN = 0.50                   # Minimum to take trade
 
 
 class PositionSizer:
@@ -89,33 +90,49 @@ class PositionSizer:
         """Update current equity for dynamic risk calculation"""
         self._current_equity = equity
     
-    def calculate_dynamic_risk(self, percentile_300: float) -> float:
+    def calculate_dynamic_risk(self, prob_60: float, prob_300: float) -> float:
         """
-        Calculate risk amount based on equity and ML percentile
+        Calculate risk amount based on equity and ML probabilities (V3)
+        
+        Risk tiers:
+        - 3.0% if both prob_60 >= 65% AND prob_300 >= 65%
+        - 2.5% if one >= 65% and other >= 55%
+        - 1.0% if both >= 50%
         
         Args:
-            percentile_300: ML model's 300s percentile score
+            prob_60: Probability of TP hit in 60s (0-1)
+            prob_300: Probability of TP hit in 300s (0-1)
             
         Returns:
             Dollar amount to risk on this trade
         """
-        # Determine risk percentage based on percentile
-        if percentile_300 >= PERCENTILE_MAX:
+        # Determine risk percentage based on probability tiers
+        if prob_60 >= PROB_HIGH and prob_300 >= PROB_HIGH:
+            # Both high confidence → max risk
             risk_pct = RISK_MAX_PCT
-        elif percentile_300 >= PERCENTILE_HIGH_EDGE:
-            risk_pct = RISK_HIGH_EDGE_PCT
-        elif percentile_300 >= PERCENTILE_NORMAL:
-            risk_pct = RISK_NORMAL_PCT
+            tier = "max"
+        elif (prob_60 >= PROB_HIGH and prob_300 >= PROB_MED) or \
+             (prob_60 >= PROB_MED and prob_300 >= PROB_HIGH):
+            # One high, one medium → medium risk
+            risk_pct = RISK_MED_PCT
+            tier = "med"
+        elif prob_60 >= PROB_MIN and prob_300 >= PROB_MIN:
+            # Both above minimum → low risk
+            risk_pct = RISK_MIN_PCT
+            tier = "min"
         else:
-            # Below threshold, use minimum
-            risk_pct = RISK_NORMAL_PCT
+            # Below threshold (shouldn't reach here if gating works)
+            risk_pct = RISK_MIN_PCT
+            tier = "fallback"
         
         risk_amount = self._current_equity * risk_pct
         
         logger.debug(
             "dynamic_risk_calculated",
             equity=f"${self._current_equity:.2f}",
-            percentile=f"{percentile_300:.1f}",
+            prob_60=f"{prob_60:.1%}",
+            prob_300=f"{prob_300:.1%}",
+            tier=tier,
             risk_pct=f"{risk_pct*100:.1f}%",
             risk_amount=f"${risk_amount:.2f}",
         )
@@ -132,7 +149,8 @@ class PositionSizer:
         signal_name: str,
         current_price: Optional[float] = None,
         total_risk_dollars: Optional[float] = None,
-        percentile_300: Optional[float] = None,
+        prob_60: Optional[float] = None,
+        prob_300: Optional[float] = None,
     ) -> PositionResult:
         """
         Calculate position sizes for a Stage 5 approved signal.
@@ -146,18 +164,19 @@ class PositionSizer:
             signal_name: Name of the signal that generated this trade
             current_price: Current market price (optional, for reference)
             total_risk_dollars: Override default total risk (takes priority)
-            percentile_300: ML model's 300s percentile for dynamic risk sizing
+            prob_60: ML model's 60s probability for dynamic risk sizing
+            prob_300: ML model's 300s probability for dynamic risk sizing
         
         Returns:
             PositionResult with two tranche positions or rejection
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
         
-        # Determine risk: explicit override > dynamic (percentile) > default
+        # Determine risk: explicit override > dynamic (probability) > default
         if total_risk_dollars is not None:
             risk = total_risk_dollars
-        elif percentile_300 is not None:
-            risk = self.calculate_dynamic_risk(percentile_300)
+        elif prob_60 is not None and prob_300 is not None:
+            risk = self.calculate_dynamic_risk(prob_60, prob_300)
         else:
             risk = self.total_risk_dollars
         

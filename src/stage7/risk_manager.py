@@ -17,14 +17,14 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Risk sizing based on percentile
-RISK_NORMAL_PCT = 0.015      # 1.5% at percentile >= 85
-RISK_HIGH_EDGE_PCT = 0.025   # 2.5% at percentile >= 92
-RISK_MAX_PCT = 0.030         # 3.0% at percentile >= 96
+# Risk sizing based on probability (V3 models)
+RISK_MIN_PCT = 0.010         # 1.0% - both probs >= 50%
+RISK_MED_PCT = 0.025         # 2.5% - one >= 65%, other >= 55%
+RISK_MAX_PCT = 0.030         # 3.0% - both probs >= 65%
 
-PERCENTILE_NORMAL = 85.0
-PERCENTILE_HIGH_EDGE = 92.0
-PERCENTILE_MAX = 96.0
+PROB_HIGH = 0.65             # High confidence threshold
+PROB_MED = 0.55              # Medium confidence threshold
+PROB_MIN = 0.50              # Minimum to take trade
 
 # Drawdown limits
 DRAWDOWN_PAUSE_PCT = -0.06   # -6% daily drawdown = pause 4 hours
@@ -224,29 +224,40 @@ class RiskManager:
                 pause_hours=PROFIT_PAUSE_HOURS,
             )
     
-    def calculate_risk_amount(self, percentile_300: float) -> float:
+    def calculate_risk_amount(self, prob_60: float, prob_300: float) -> float:
         """
-        Calculate risk amount based on current equity and ML percentile
+        Calculate risk amount based on current equity and ML probabilities (V3)
+        
+        Risk tiers:
+        - 3.0% if both prob_60 >= 65% AND prob_300 >= 65%
+        - 2.5% if one >= 65% and other >= 55%
+        - 1.0% if both >= 50%
         
         Returns dollar amount to risk on this trade
         """
-        # Determine risk percentage based on percentile
-        if percentile_300 >= PERCENTILE_MAX:
+        # Determine risk percentage based on probability tiers
+        if prob_60 >= PROB_HIGH and prob_300 >= PROB_HIGH:
             risk_pct = RISK_MAX_PCT
-        elif percentile_300 >= PERCENTILE_HIGH_EDGE:
-            risk_pct = RISK_HIGH_EDGE_PCT
-        elif percentile_300 >= PERCENTILE_NORMAL:
-            risk_pct = RISK_NORMAL_PCT
+            tier = "max"
+        elif (prob_60 >= PROB_HIGH and prob_300 >= PROB_MED) or \
+             (prob_60 >= PROB_MED and prob_300 >= PROB_HIGH):
+            risk_pct = RISK_MED_PCT
+            tier = "med"
+        elif prob_60 >= PROB_MIN and prob_300 >= PROB_MIN:
+            risk_pct = RISK_MIN_PCT
+            tier = "min"
         else:
-            # Below threshold, use minimum
-            risk_pct = RISK_NORMAL_PCT
+            risk_pct = RISK_MIN_PCT
+            tier = "fallback"
         
         risk_amount = self._current_equity * risk_pct
         
         logger.debug(
             "risk_calculated",
             equity=f"${self._current_equity:.2f}",
-            percentile=f"{percentile_300:.1f}",
+            prob_60=f"{prob_60:.1%}",
+            prob_300=f"{prob_300:.1%}",
+            tier=tier,
             risk_pct=f"{risk_pct*100:.1f}%",
             risk_amount=f"${risk_amount:.2f}",
         )
