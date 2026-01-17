@@ -40,6 +40,9 @@ class AbsorptionProcessor:
         # For refill rate calculation
         self._last_depth: Optional[DepthSnapshot] = None
         self._refill_events: deque[Tuple[int, float]] = deque(maxlen=50)
+        self._sweep_side: Optional[str] = None  # "ASK" or "BID"
+        self._pre_sweep_depth: Dict[str, float] = {"bid": 0.0, "ask": 0.0}
+        self._sweep_timestamp_ms: Optional[int] = None
         
         # For sweep detection
         self._level_clear_events: deque[int] = deque(maxlen=20)  # timestamps
@@ -139,6 +142,16 @@ class AbsorptionProcessor:
         # Sweep if 3+ levels cleared on either side
         if bid_cleared >= 3 or ask_cleared >= 3:
             self._level_clear_events.append(current.timestamp_ms)
+            # Store pre-sweep depth and side
+            if ask_cleared >= 3:
+                self._sweep_side = "ASK"
+            else:
+                self._sweep_side = "BID"
+            self._pre_sweep_depth = {
+                "bid": self._last_depth.bid_depth,
+                "ask": self._last_depth.ask_depth,
+            }
+            self._sweep_timestamp_ms = current.timestamp_ms
             return True
         
         # Also check for rapid consecutive clears
@@ -148,22 +161,28 @@ class AbsorptionProcessor:
     
     def _compute_refill_rate(self, current: DepthSnapshot) -> float:
         """
-        Refill rate = new resting size after trade / time
-        Detects iceberg orders and passive refills
+        Refill rate = normalized depth recovery after sweep
+        Side-aware: tracks refill on the swept side only
+        Normalized by pre-sweep baseline depth
         """
-        if self._last_depth is None:
+        if self._last_depth is None or self._sweep_timestamp_ms is None:
             return 0.0
         
-        time_delta_s = (current.timestamp_ms - self._last_depth.timestamp_ms) / 1000.0
+        time_delta_s = (current.timestamp_ms - self._sweep_timestamp_ms) / 1000.0
         if time_delta_s < 0.01:
             return 0.0
         
-        # Calculate depth increase (refill)
-        bid_increase = max(0, current.bid_depth - self._last_depth.bid_depth)
-        ask_increase = max(0, current.ask_depth - self._last_depth.ask_depth)
+        # Side-aware refill
+        if self._sweep_side == "ASK":
+            refill = max(0.0, current.ask_depth - self._pre_sweep_depth["ask"])
+            baseline = max(self._pre_sweep_depth["ask"], 1e-9)
+        else:
+            refill = max(0.0, current.bid_depth - self._pre_sweep_depth["bid"])
+            baseline = max(self._pre_sweep_depth["bid"], 1e-9)
         
-        total_refill = bid_increase + ask_increase
-        return total_refill / time_delta_s
+        # Normalized refill speed
+        refill_rate = (refill / baseline) / time_delta_s
+        return refill_rate
     
     def _update_stats(self) -> None:
         """Update rolling mean/std for z-scoring"""
