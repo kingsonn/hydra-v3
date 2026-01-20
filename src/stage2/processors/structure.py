@@ -118,6 +118,14 @@ class StructureProcessor:
         # ATR for distance normalization
         self._atr_5m = 0.0
         
+        # Minimum volume threshold for valid profile (prevents noise)
+        self._min_volume_threshold = 0.0
+        self._min_bins_for_lvn = 5  # Need at least 5 price bins for valid LVN
+        
+        # LVN stability: track last valid LVN to avoid jitter
+        self._last_valid_lvn = 0.0
+        self._lvn_stability_threshold = 0.002  # 0.2% change = new LVN
+        
         # Cached features
         self._last_features = StructureFeatures()
     
@@ -239,11 +247,34 @@ class StructureProcessor:
         if not self._profile_5m:
             return
         
+        # Need minimum bins for meaningful structure
+        if len(self._profile_5m) < self._min_bins_for_lvn:
+            return
+        
         # POC = price with max volume
         self._poc_5m = max(self._profile_5m.items(), key=lambda x: x[1])[0]
         
-        # LVN = price with min volume
-        self._lvn_5m = min(self._profile_5m.items(), key=lambda x: x[1])[0]
+        # LVN computation with stability filter
+        # Find the bin with minimum volume, but filter out edge bins
+        sorted_bins = sorted(self._profile_5m.items(), key=lambda x: x[0])
+        
+        # Exclude top and bottom 10% of price range (edge noise)
+        trim_count = max(1, len(sorted_bins) // 10)
+        interior_bins = sorted_bins[trim_count:-trim_count] if len(sorted_bins) > 2 * trim_count else sorted_bins
+        
+        if interior_bins:
+            candidate_lvn = min(interior_bins, key=lambda x: x[1])[0]
+            
+            # Stability check: only update LVN if it moved significantly
+            if self._last_valid_lvn == 0.0:
+                self._lvn_5m = candidate_lvn
+                self._last_valid_lvn = candidate_lvn
+            else:
+                pct_change = abs(candidate_lvn - self._last_valid_lvn) / self._last_valid_lvn
+                if pct_change >= self._lvn_stability_threshold:
+                    self._lvn_5m = candidate_lvn
+                    self._last_valid_lvn = candidate_lvn
+                # Otherwise keep the previous LVN for stability
         
         # VAH/VAL = 70% value area around POC
         self._vah_5m, self._val_5m = self._compute_value_area(self._profile_5m, self._poc_5m)

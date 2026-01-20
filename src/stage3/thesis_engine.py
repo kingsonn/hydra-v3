@@ -14,15 +14,18 @@ from src.stage3.models import Signal, Thesis, Direction, ThesisState
 from src.stage3.processors.signals import (
     funding_price_cointegration,
     hawkes_liquidation_cascade,
-    kyle_lambda_divergence,
-    inventory_lock,
-    failed_acceptance_reversal,
-    queue_reactive_liquidity,
     liquidity_crisis_detector,
     flip_rate_compression_break,
-    order_flow_dominance_decay,
+    exhaustion_reversal,
+    sweep_vacuum_continuation,
+    absorption_flow_divergence,
+    kyle_lambda_filter,
+    oi_not_expanding_filter,
+    vol_expansion_filter,
 )
-from src.stage4.filter import StructuralFilter, FilterResult, orderflow_confirmation
+# Stage 4/4.5 filters REMOVED - see audit notes
+# structural_location_ok: AND logic paradox (LVN ≠ VA boundary)
+# orderflow_confirmation: Redundant with Stage 3 signals
 from src.stage5.predictor_v3 import MLPredictorV3, PredictionResultV3
 from src.utils.meta_logger import log_signal_event
 
@@ -158,8 +161,8 @@ class ThesisEngine:
             s: RegimeTracker() for s in symbols
         }
         
-        # Stage 4 structural filter
-        self._structural_filter = StructuralFilter()
+        # Stage 4/4.5 REMOVED - filters destroyed edge via over-filtering
+        # Signals now go directly from Stage 3 to Stage 5
         
         # Stage 5 ML predictor (V3 with probability-based classification)
         self._ml_predictor = MLPredictorV3()
@@ -167,14 +170,8 @@ class ThesisEngine:
         # Current thesis per symbol
         self._theses: Dict[str, Thesis] = {}
         
-        # Last filter result per symbol (for transparency)
-        self._filter_results: Dict[str, FilterResult] = {}
-        
         # Last ML prediction per symbol (for transparency)
         self._ml_predictions: Dict[str, PredictionResultV3] = {}
-        
-        # Orderflow filter details per symbol (for transparency)
-        self._orderflow_details: Dict[str, Dict] = {}
         
         # Stats
         self._signal_counts: Dict[str, int] = {s: 0 for s in symbols}
@@ -208,14 +205,12 @@ class ThesisEngine:
         # Generate thesis (Stage 3)
         thesis = self._generate_thesis(thesis_state)
         
-        # Apply Stage 4 structural location filter
-        thesis = self._apply_structural_filter(thesis, thesis_state)
+        # Stage 4/4.5 REMOVED - filters destroyed edge via:
+        # - structural_location_ok: AND logic paradox (LVN ≠ VA boundary)
+        # - orderflow_confirmation: Redundant with Stage 3 signal logic
+        # Signals now go directly to Stage 5 ML gate
         
-        # Apply Stage 4.5 orderflow confirmation filter
-        if thesis.allowed and thesis.direction != Direction.NONE:
-            thesis = self._apply_orderflow_filter(thesis, state)
-        
-        # If signal passed Stage 4.5, run Stage 5 ML predictions
+        # If signal passed Stage 3, run Stage 5 ML predictions
         if thesis.allowed and thesis.direction != Direction.NONE:
             prediction = self._run_ml_prediction(thesis, thesis_state, state)
             
@@ -273,7 +268,8 @@ class ThesisEngine:
         moi_std = state.order_flow.moi_std + 1e-9
         aggression_persistence = state.order_flow.aggression_persistence + 1e-9
         
-        moi_z = abs(state.order_flow.moi_1s) / moi_std
+        # FIXED: Preserve sign for moi_z (was using abs() which lost direction info)
+        moi_z = state.order_flow.moi_1s / moi_std
         delta_vel_z = abs(state.order_flow.delta_velocity) / moi_std
         flip_noise = state.order_flow.moi_flip_rate / aggression_persistence
         
@@ -332,6 +328,17 @@ class ThesisEngine:
         """
         # ========== HARD VETO RULES (NON-NEGOTIABLE) ==========
         
+        # DATA STALENESS CHECK: Prevent signals on stale data
+        # OI delta of exactly 0.0 on both windows likely indicates stale feed
+        if state.oi_delta_1m == 0.0 and state.oi_delta_5m == 0.0:
+            return Thesis(
+                allowed=False,
+                direction=Direction.NONE,
+                strength=0.0,
+                reasons=[],
+                veto_reason="OI data potentially stale (both deltas = 0)",
+            )
+        
         # CHOP = no trading
         if state.regime == "CHOP":
             return Thesis(
@@ -356,6 +363,9 @@ class ThesisEngine:
             )
         
         # ========== COLLECT SIGNALS ==========
+        # 6 entry signals after validation audit
+        # Removed: Queue Reactive Liquidity, OFDD, Inventory Lock, FAR, Entropy Flow,
+        #          POC Magnetic Reversal, Value Area Rejection, Absorption Accumulation
         
         signals: List[Signal] = []
         
@@ -369,49 +379,37 @@ class ThesisEngine:
         if hlc:
             signals.append(hlc)
         
-        # Signal 3: Kyle's Lambda Divergence (B-tier)
-        kld = kyle_lambda_divergence(state)
-        if kld:
-            signals.append(kld)
-        
-        # Signal 4: Inventory Lock (ILI)
-        ili = inventory_lock(state)
-        if ili:
-            signals.append(ili)
-        
-        # Signal 5: Failed Acceptance Reversal (FAR)
-        far = failed_acceptance_reversal(state)
-        if far:
-            signals.append(far)
-        
-        # Signal 6: Queue Reactive Liquidity (S-tier)
-        qrl = queue_reactive_liquidity(state)
-        if qrl:
-            signals.append(qrl)
-        
-        # Signal 7: Liquidity Crisis Detector (A-tier)
+        # Signal 3: Liquidity Crisis Detector (A-tier)
         lcd = liquidity_crisis_detector(state)
         if lcd:
             signals.append(lcd)
         
-        # Signal 8: Flip-Rate Compression Break (A-S tier)
+        # Signal 4: Flip-Rate Compression Break (A-S tier)
         frcb = flip_rate_compression_break(state)
         if frcb:
             signals.append(frcb)
         
-        # Signal 9: Order-Flow Dominance Decay (S-tier)
-        ofdd = order_flow_dominance_decay(state)
-        if ofdd:
-            signals.append(ofdd)
+        # Signal 5: Exhaustion Reversal (A-tier) - NEW
+        # Gate with OI filter: suppress if OI is expanding (continuation likely)
+        if oi_not_expanding_filter(state):
+            exh = exhaustion_reversal(state)
+            if exh:
+                signals.append(exh)
         
-        # Log all detected signals
-        # if signals:
-        #     logger.info(
-        #         "thesis_signals_detected",
-        #         symbol=state.symbol,
-        #         count=len(signals),
-        #         signals=[f"{s.direction.value}:{s.name}:{s.confidence}" for s in signals],
-        #     )
+        # Signal 6: Sweep Vacuum Continuation (A-tier)
+        svc = sweep_vacuum_continuation(state)
+        if svc:
+            signals.append(svc)
+        
+        # Signal 7: Absorption-Flow Divergence (A-tier) - NEW
+        # Gate with OI filter: suppress if OI is expanding (this is a reversal signal)
+        if oi_not_expanding_filter(state):
+            afd = absorption_flow_divergence(state)
+            if afd:
+                signals.append(afd)
+        
+        # Kyle's Lambda is now a FILTER only (not entry signal)
+        # It's used in _apply_kyle_filter() for reversal confirmation
         
         # ========== SCORE DIRECTIONS ==========
         
@@ -459,138 +457,9 @@ class ThesisEngine:
                 reasons=[s for s in signals if s.direction == Direction.SHORT],
             )
     
-    def _apply_structural_filter(self, thesis: Thesis, state: ThesisState) -> Thesis:
-        """
-        Apply Stage 4 structural location filter to thesis
-        
-        Only allows trades:
-        - Near 5m LVN (dist_lvn < threshold)
-        - OR at 30m value extremes (VAL for LONG, VAH for SHORT)
-        """
-        # If thesis already blocked, skip filter
-        if not thesis.allowed or thesis.direction == Direction.NONE:
-            return thesis
-        
-        # Create a dummy signal for the filter
-        filter_signal = Signal(thesis.direction, thesis.strength, "thesis")
-        
-        # Apply filter
-        result = self._structural_filter.filter_signal(
-            signal=filter_signal,
-            regime=state.regime,
-            price=state.price,
-            dist_lvn=state.dist_lvn,
-            vah=state.vah,
-            val=state.val,
-        )
-        
-        # Store result for transparency
-        self._filter_results[state.symbol] = result
-        
-        # If filter rejects, update thesis with detailed reason
-        if not result.allowed:
-            # Build detailed rejection reason
-            lvn_threshold = self._structural_filter.lvn_threshold
-            details = []
-            
-            if result.reason.value == "regime_chop":
-                details.append("regime=CHOP")
-            elif result.reason.value == "bad_structural_location":
-                details.append(f"dist_lvn={state.dist_lvn:.3f}>={lvn_threshold}")
-                if thesis.direction == Direction.LONG:
-                    details.append(f"price={state.price:.2f}>VAL={state.val:.2f}")
-                else:  # SHORT
-                    details.append(f"price={state.price:.2f}<VAH={state.vah:.2f}")
-            
-            reason_str = ", ".join(details) if details else result.reason.value
-            
-            return Thesis(
-                allowed=False,
-                direction=thesis.direction,  # Keep direction for transparency
-                strength=thesis.strength,
-                reasons=thesis.reasons,
-                veto_reason=f"Stage 4: {reason_str}",
-            )
-        
-        # Add pass reason to result for transparency
-        return thesis
-    
-    def _apply_orderflow_filter(
-        self,
-        thesis: Thesis,
-        market_state: MarketState,
-    ) -> Thesis:
-        """
-        Apply Stage 4.5 orderflow confirmation filter.
-        
-        Confirms that orderflow aligns with signal direction.
-        """
-        from src.stage2.processors.regime import PAIR_THRESHOLDS, PairThresholds
-        from src.stage4.filter import DEPTH_IMBALANCE_THRESHOLD
-        
-        symbol = market_state.symbol
-        delta_velocity = market_state.order_flow.delta_velocity
-        depth_imbalance = market_state.absorption.depth_imbalance
-        absorption_z = market_state.absorption.absorption_z
-        
-        # Get pair-specific thresholds
-        thresholds = PAIR_THRESHOLDS.get(symbol, PairThresholds())
-        absorb_threshold = thresholds.absorption_z_spike
-        
-        confirmed = orderflow_confirmation(
-            direction=thesis.direction,
-            symbol=symbol,
-            delta_velocity=delta_velocity,
-            depth_imbalance=depth_imbalance,
-            absorption_z=absorption_z,
-        )
-        
-        # Store orderflow filter details for transparency
-        self._orderflow_details[symbol] = {
-            "delta_velocity": delta_velocity,
-            "depth_imbalance": depth_imbalance,
-            "absorption_z": absorption_z,
-            "depth_threshold": DEPTH_IMBALANCE_THRESHOLD,
-            "absorb_threshold": absorb_threshold,
-            "confirmed": confirmed,
-        }
-        
-        if not confirmed:
-            # Build detailed rejection reason
-            reasons = []
-            if thesis.direction == Direction.LONG:
-                if delta_velocity <= 0:
-                    reasons.append(f"delta_vel={delta_velocity:.3f}<=0")
-                if depth_imbalance <= DEPTH_IMBALANCE_THRESHOLD:
-                    reasons.append(f"depth_imb={depth_imbalance:.3f}<={DEPTH_IMBALANCE_THRESHOLD}")
-                if absorption_z >= absorb_threshold:
-                    reasons.append(f"absorb_z={absorption_z:.2f}>={absorb_threshold}")
-            else:  # SHORT
-                if delta_velocity >= 0:
-                    reasons.append(f"delta_vel={delta_velocity:.3f}>=0")
-                if depth_imbalance >= -DEPTH_IMBALANCE_THRESHOLD:
-                    reasons.append(f"depth_imb={depth_imbalance:.3f}>={-DEPTH_IMBALANCE_THRESHOLD}")
-                if absorption_z <= -absorb_threshold:
-                    reasons.append(f"absorb_z={absorption_z:.2f}<={-absorb_threshold}")
-            
-            reason_str = ", ".join(reasons) if reasons else "conditions_not_met"
-            
-            # Clear ML prediction when Stage 4.5 fails
-            if symbol in self._ml_predictions:
-                del self._ml_predictions[symbol]
-            
-            return Thesis(
-                allowed=False,
-                direction=thesis.direction,
-                strength=thesis.strength,
-                reasons=thesis.reasons,
-                veto_reason=f"Stage 4.5: {reason_str}",
-            )
-        
-        # Store success reason
-        self._orderflow_details[symbol]["reason"] = "confirmed"
-        
-        return thesis
+    # Stage 4/4.5 methods REMOVED - see audit notes at top of file
+    # _apply_structural_filter: Deleted (AND logic paradox)
+    # _apply_orderflow_filter: Deleted (redundant with Stage 3)
     
     def _run_ml_prediction(
         self,
@@ -599,7 +468,7 @@ class ThesisEngine:
         market_state: MarketState,
     ) -> Optional[PredictionResultV3]:
         """
-        Run Stage 5 ML predictions for a signal that passed Stage 4.5.
+        Run Stage 5 ML predictions for a signal that passed Stage 3.
         
         V3 uses probability-based classification models.
         Returns prediction result for probability + percentile gating.
@@ -737,21 +606,14 @@ class ThesisEngine:
         """Get all current theses"""
         return self._theses.copy()
     
-    def get_filter_result(self, symbol: str) -> Optional[FilterResult]:
-        """Get last Stage 4 filter result for symbol"""
-        return self._filter_results.get(symbol)
-    
-    def get_filter_stats(self) -> Dict[str, Any]:
-        """Get Stage 4 filter statistics"""
-        return self._structural_filter.get_stats()
+    # Stage 4/4.5 getter methods REMOVED
+    # get_filter_result: Deleted with Stage 4
+    # get_filter_stats: Deleted with Stage 4
+    # get_orderflow_details: Deleted with Stage 4.5
     
     def get_ml_prediction(self, symbol: str) -> Optional[PredictionResultV3]:
         """Get last Stage 5 ML prediction for symbol"""
         return self._ml_predictions.get(symbol)
-    
-    def get_orderflow_details(self, symbol: str) -> Optional[Dict]:
-        """Get last Stage 4.5 orderflow filter details for symbol"""
-        return self._orderflow_details.get(symbol)
     
     def get_all_ml_predictions(self) -> Dict[str, PredictionResultV3]:
         """Get all ML predictions"""
@@ -770,6 +632,6 @@ class ThesisEngine:
             "long_count": long_count,
             "short_count": short_count,
             "theses": {s: t.to_dict() for s, t in self._theses.items()},
-            "stage4_filter": self._structural_filter.get_stats(),
+            # stage4_filter: REMOVED - see audit notes
             "stage5_ml_predictions": {s: p.to_dict() for s, p in self._ml_predictions.items()},
         }

@@ -1,0 +1,51 @@
+{
+  "version": "v4.1",
+  "objective": "P(+2R before -1R | Stage 3 signal)",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "LTCUSDT",
+    "ADAUSDT"
+  ],
+  "features": [
+    "vol_5m",
+    "vol_ratio",
+    "vol_rank",
+    "ATR_1h_pct",
+    "absorption_z",
+    "price_impact_z",
+    "trade_intensity",
+    "trade_intensity_z",
+    "dist_poc_atr",
+    "dist_lvn_atr",
+    "hour_sin",
+    "hour_cos",
+    "is_weekend",
+    "MOI_z_lag",
+    "cum_delta_5m_lag",
+    "delta_velocity_lag",
+    "bars_in_regime"
+  ],
+  "horizon_sec": 900,
+  "R_definition": "0.6 \u00d7 ATR_1h + 0.08% fees",
+  "ATR_multiplier": 0.6,
+  "TP_ratio": 2.0,
+  "SL_ratio": 1.0,
+  "total_models": 29,
+  "trained_at": "2026-01-18T14:02:36.138901+00:00",
+  "v4_1_changes": [
+    "R = 0.6 \u00d7 ATR_1h + fees (more stable than ATR_5m)",
+    "Horizon = 900s (15 min) instead of 300s (5 min)",
+    "ATR_1h computed from 14400 bars (1 hour)"
+  ],
+  "core_principles": [
+    "Lagged order flow features (1-min lag) to prevent signal leakage",
+    "Direction is INPUT from signal, not derived from features",
+    "Binary labels: 1=TP first, 0=SL first, unresolved DROPPED",
+    "Single model per direction/regime (no separate filter model)"
+  ]
+}

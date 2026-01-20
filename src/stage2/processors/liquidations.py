@@ -21,7 +21,7 @@ class LiquidationProcessor:
     def __init__(
         self, 
         symbol: str,
-        cascade_multiplier: float = 3.0,      # k1: cascade threshold vs avg
+        cascade_multiplier: float = 2.0,      # k1: cascade threshold vs avg (lowered from 3.0)
         cascade_imbalance_thresh: float = 0.6, # Imbalance threshold for cascade
         exhaustion_threshold: float = 100.0,   # USD threshold for "no activity"
         history_size: int = 600,               # 10 min of events max

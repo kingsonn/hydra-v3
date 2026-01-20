@@ -42,10 +42,17 @@ class FundingOIProcessor:
         # Cached features
         self._last_funding = FundingFeatures()
         self._last_oi = OIFeatures()
+        
+        # Staleness tracking
+        self._last_funding_update_ms: int = 0
+        self._last_oi_update_ms: int = 0
+        self._oi_stale_threshold_ms: int = 120_000  # 2 minutes = stale
+        self._funding_stale_threshold_ms: int = 28_800_000  # 8 hours = stale
     
     def add_funding(self, funding: FundingRate) -> FundingFeatures:
         """Add funding rate and compute features"""
         self._funding_rates.append((funding.timestamp_ms, funding.funding_rate))
+        self._last_funding_update_ms = int(time.time() * 1000)
         
         # Update stats
         if len(self._funding_rates) >= 10:
@@ -78,6 +85,7 @@ class FundingOIProcessor:
         """Add OI reading and compute features"""
         self._oi_history.append((oi.timestamp_ms, oi.open_interest))
         self._price_history.append((oi.timestamp_ms, current_price))
+        self._last_oi_update_ms = int(time.time() * 1000)
         
         # Current OI
         current_oi = oi.open_interest
@@ -172,6 +180,26 @@ class FundingOIProcessor:
     def get_oi_features(self) -> OIFeatures:
         """Get current OI features"""
         return self._last_oi
+    
+    def is_oi_stale(self) -> bool:
+        """Check if OI data is stale (no update in 2+ minutes)"""
+        if self._last_oi_update_ms == 0:
+            return True  # Never updated
+        age_ms = int(time.time() * 1000) - self._last_oi_update_ms
+        return age_ms > self._oi_stale_threshold_ms
+    
+    def is_funding_stale(self) -> bool:
+        """Check if funding data is stale (no update in 8+ hours)"""
+        if self._last_funding_update_ms == 0:
+            return True  # Never updated
+        age_ms = int(time.time() * 1000) - self._last_funding_update_ms
+        return age_ms > self._funding_stale_threshold_ms
+    
+    def get_oi_age_ms(self) -> int:
+        """Get age of last OI update in milliseconds"""
+        if self._last_oi_update_ms == 0:
+            return 999999999
+        return int(time.time() * 1000) - self._last_oi_update_ms
 
 
 class MultiSymbolFundingOIProcessor:

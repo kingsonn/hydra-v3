@@ -34,23 +34,31 @@ HORIZONS = [60, 300]
 @dataclass
 class PredictionResultV3:
     """Result from V3 ML predictions"""
-    prob_60: float = 0.0  # Probability of TP hit in 60s
+    should_trade_60: float = 0.0  # Probability that we should trade (filter model)
+    should_trade_300: float = 0.0
+    prob_60: float = 0.0  # Probability of TP hit in 60s (direction model)
     prob_300: float = 0.0  # Probability of TP hit in 300s
     percentile_60: float = 0.0
     percentile_300: float = 0.0
     model_60: str = ""
     model_300: str = ""
+    filter_model_60: str = ""
+    filter_model_300: str = ""
     ensemble_size: int = 0
     cross_sectional_rank: float = 0.5
     
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "should_trade_60": self.should_trade_60,
+            "should_trade_300": self.should_trade_300,
             "prob_60": self.prob_60,
             "prob_300": self.prob_300,
             "percentile_60": self.percentile_60,
             "percentile_300": self.percentile_300,
             "model_60": self.model_60,
             "model_300": self.model_300,
+            "filter_model_60": self.filter_model_60,
+            "filter_model_300": self.filter_model_300,
             "ensemble_size": self.ensemble_size,
             "cross_sectional_rank": self.cross_sectional_rank,
         }
@@ -101,35 +109,65 @@ class MLPredictorV3:
         logger.info("predictor_v3_initialized", models=len(self._models), features=len(self._feature_columns))
     
     def _load_models(self):
-        """Load only the 12 correct models (direction_regime_horizon format)"""
+        """Load per-symbol models from models_v3/<SYMBOL>/models_<direction>_<regime>_<horizon>.pkl"""
         if not self.models_dir.exists():
             logger.warning("models_dir_not_found", path=str(self.models_dir))
             return
         
-        # Only load models with correct naming: models_{up/down}_{low/mid/high}_{60/300}.pkl
-        for direction in ["up", "down"]:
-            for regime in VOL_REGIMES:
-                for horizon in HORIZONS:
-                    model_name = f"models_{direction}_{regime}_{horizon}"
-                    pkl_path = self.models_dir / f"{model_name}.pkl"
-                    
-                    if not pkl_path.exists():
-                        logger.warning("model_not_found", name=model_name)
-                        continue
-                    
-                    try:
-                        with open(pkl_path, "rb") as f:
-                            loaded = pickle.load(f)
-                            # Handle new format with calibrator
-                            if isinstance(loaded, dict) and "models" in loaded:
-                                self._models[model_name] = loaded["models"]
-                                if loaded.get("calibrator"):
-                                    self._calibrators[model_name] = loaded["calibrator"]
-                            else:
-                                self._models[model_name] = loaded if isinstance(loaded, list) else [loaded]
-                        logger.debug("model_loaded", name=model_name, ensemble_size=len(self._models[model_name]))
-                    except Exception as e:
-                        logger.error("model_load_failed", name=model_name, error=str(e))
+        # Load per-symbol models: models_v3/<SYMBOL>/models_{up/down}_{low/mid/high}_{60/300}.pkl
+        for symbol in VALID_SYMBOLS:
+            symbol_dir = self.models_dir / symbol
+            if not symbol_dir.exists():
+                # Fallback: try flat directory structure (old format)
+                continue
+            
+            for direction in ["up", "down"]:
+                for regime in VOL_REGIMES:
+                    for horizon in HORIZONS:
+                        model_file = f"models_{direction}_{regime}_{horizon}.pkl"
+                        pkl_path = symbol_dir / model_file
+                        # Key format: SYMBOL_direction_regime_horizon
+                        model_key = f"{symbol}_{direction}_{regime}_{horizon}"
+                        
+                        if not pkl_path.exists():
+                            continue
+                        
+                        try:
+                            with open(pkl_path, "rb") as f:
+                                loaded = pickle.load(f)
+                                if isinstance(loaded, dict) and "models" in loaded:
+                                    self._models[model_key] = loaded["models"]
+                                    if loaded.get("calibrator"):
+                                        self._calibrators[model_key] = loaded["calibrator"]
+                                else:
+                                    self._models[model_key] = loaded if isinstance(loaded, list) else [loaded]
+                            logger.debug("model_loaded", key=model_key, ensemble_size=len(self._models[model_key]))
+                        except Exception as e:
+                            logger.error("model_load_failed", key=model_key, error=str(e))
+        
+        # Fallback: load flat directory structure if no per-symbol models found
+        if len(self._models) == 0:
+            logger.info("trying_flat_model_structure")
+            for direction in ["up", "down"]:
+                for regime in VOL_REGIMES:
+                    for horizon in HORIZONS:
+                        model_name = f"models_{direction}_{regime}_{horizon}"
+                        pkl_path = self.models_dir / f"{model_name}.pkl"
+                        
+                        if not pkl_path.exists():
+                            continue
+                        
+                        try:
+                            with open(pkl_path, "rb") as f:
+                                loaded = pickle.load(f)
+                                if isinstance(loaded, dict) and "models" in loaded:
+                                    self._models[model_name] = loaded["models"]
+                                    if loaded.get("calibrator"):
+                                        self._calibrators[model_name] = loaded["calibrator"]
+                                else:
+                                    self._models[model_name] = loaded if isinstance(loaded, list) else [loaded]
+                        except Exception as e:
+                            logger.error("model_load_failed", name=model_name, error=str(e))
         
         logger.info("models_loaded", count=len(self._models), calibrators=len(self._calibrators))
     
@@ -342,9 +380,32 @@ class MLPredictorV3:
         
         return ranks
     
-    def _get_model_name(self, direction: Direction, vol_regime: str, horizon: int) -> str:
+    def _get_model_key(self, symbol: str, direction: Direction, vol_regime: str, horizon: int) -> str:
+        """Get direction model key - tries per-symbol first, then falls back to flat structure"""
         dir_str = "up" if direction == Direction.LONG else "down"
-        return f"models_{dir_str}_{vol_regime.lower()}_{horizon}"
+        regime = vol_regime.lower()
+        
+        # Per-symbol key: SYMBOL_direction_regime_horizon
+        per_symbol_key = f"{symbol}_{dir_str}_{regime}_{horizon}"
+        if per_symbol_key in self._models:
+            return per_symbol_key
+        
+        # Fallback: flat structure key
+        flat_key = f"models_{dir_str}_{regime}_{horizon}"
+        return flat_key
+    
+    def _get_filter_key(self, symbol: str, vol_regime: str, horizon: int) -> str:
+        """Get filter model key (trade/no-trade classifier)"""
+        regime = vol_regime.lower()
+        
+        # Per-symbol key: SYMBOL_filter_regime_horizon
+        per_symbol_key = f"{symbol}_filter_{regime}_{horizon}"
+        if per_symbol_key in self._models:
+            return per_symbol_key
+        
+        # Fallback: flat structure key
+        flat_key = f"models_filter_{regime}_{horizon}"
+        return flat_key
     
     def _ensemble_predict(self, models: List, features: pd.DataFrame) -> float:
         preds = []
@@ -378,7 +439,9 @@ class MLPredictorV3:
         features: Dict[str, float],
     ) -> PredictionResultV3:
         """
-        Run prediction using pre-computed features.
+        Run two-stage prediction:
+        1. Filter model: Should we trade at all? (trade/no-trade)
+        2. Direction model: If trading, probability of TP hit
         
         Args:
             direction: LONG or SHORT
@@ -389,7 +452,7 @@ class MLPredictorV3:
         result = PredictionResultV3()
         
         try:
-            # Add cross-sectional ranks
+            # Add cross-sectional ranks (for backward compatibility)
             cs_ranks = self._compute_cross_sectional_ranks(symbol, features)
             features.update(cs_ranks)
             
@@ -400,27 +463,50 @@ class MLPredictorV3:
             
             feat_df = pd.DataFrame([feat_vec], columns=self._feature_columns)
             
-            # Get models
-            model_60 = self._get_model_name(direction, vol_regime, 60)
-            model_300 = self._get_model_name(direction, vol_regime, 300)
+            # Stage 1: FILTER models (should we trade?)
+            filter_60 = self._get_filter_key(symbol, vol_regime, 60)
+            filter_300 = self._get_filter_key(symbol, vol_regime, 300)
+            result.filter_model_60 = filter_60
+            result.filter_model_300 = filter_300
+            
+            if filter_60 in self._models:
+                raw_filter_60 = self._ensemble_predict(self._models[filter_60], feat_df)
+                if filter_60 in self._calibrators:
+                    result.should_trade_60 = float(np.clip(self._calibrators[filter_60].predict([raw_filter_60])[0], 0, 1))
+                else:
+                    result.should_trade_60 = raw_filter_60
+            else:
+                result.should_trade_60 = 1.0  # Default: allow trade if no filter model
+            
+            if filter_300 in self._models:
+                raw_filter_300 = self._ensemble_predict(self._models[filter_300], feat_df)
+                if filter_300 in self._calibrators:
+                    result.should_trade_300 = float(np.clip(self._calibrators[filter_300].predict([raw_filter_300])[0], 0, 1))
+                else:
+                    result.should_trade_300 = raw_filter_300
+            else:
+                result.should_trade_300 = 1.0
+            
+            # Stage 2: DIRECTION models (probability of TP hit)
+            model_60 = self._get_model_key(symbol, direction, vol_regime, 60)
+            model_300 = self._get_model_key(symbol, direction, vol_regime, 300)
             result.model_60 = model_60
             result.model_300 = model_300
             
             if model_60 not in self._models or model_300 not in self._models:
                 return result
             
-            # Predict
             raw_prob_60 = self._ensemble_predict(self._models[model_60], feat_df)
             raw_prob_300 = self._ensemble_predict(self._models[model_300], feat_df)
             
-            # Apply calibration if available
+            # Apply calibration
             if model_60 in self._calibrators:
-                result.prob_60 = float(self._calibrators[model_60].predict([raw_prob_60])[0])
+                result.prob_60 = float(np.clip(self._calibrators[model_60].predict([raw_prob_60])[0], 0, 1))
             else:
                 result.prob_60 = raw_prob_60
             
             if model_300 in self._calibrators:
-                result.prob_300 = float(self._calibrators[model_300].predict([raw_prob_300])[0])
+                result.prob_300 = float(np.clip(self._calibrators[model_300].predict([raw_prob_300])[0], 0, 1))
             else:
                 result.prob_300 = raw_prob_300
             
@@ -434,14 +520,15 @@ class MLPredictorV3:
             self._update_buffer(model_60, result.prob_60)
             self._update_buffer(model_300, result.prob_300)
             
-            # Cross-sectional rank for this prediction
             result.cross_sectional_rank = cs_ranks.get("MOI_z_rank", 0.5)
             
             # Periodic save
             if sum(len(b) for b in self._percentile_buffers.values()) % 100 == 0:
                 self._save_percentile_buffers()
             
-            logger.debug("prediction_v3", symbol=symbol, prob_60=result.prob_60, prob_300=result.prob_300)
+            logger.debug("prediction_v3", symbol=symbol, 
+                        should_trade_60=result.should_trade_60, should_trade_300=result.should_trade_300,
+                        prob_60=result.prob_60, prob_300=result.prob_300)
             
         except Exception as e:
             logger.error("predict_error", symbol=symbol, error=str(e))

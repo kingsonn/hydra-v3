@@ -10,3 +10,9 @@
 /tradesdata_with_ml_predictions.csv
 /tradesdata_with_signals.csv
 /tradesdata_with_success.csv
+/__pycache__
+/data
+*.pyc
+*.db
+*.zIP
+/src/*__pycache__

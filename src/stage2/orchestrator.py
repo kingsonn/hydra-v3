@@ -14,19 +14,50 @@ from src.core.models import Trade, Bar, OrderBookSnapshot, VolumeProfile
 from src.core.models import FundingRate, OpenInterest, Liquidation
 
 from src.stage2.models import (
-    MarketState, Regime, OrderFlowFeatures, AbsorptionFeatures,
+    MarketState, Regime, RegimeClassification, OrderFlowFeatures, AbsorptionFeatures,
     VolatilityFeatures, StructureFeatures, FundingFeatures,
     OIFeatures, LiquidationFeatures
 )
 from src.stage2.processors.order_flow import OrderFlowProcessor
 from src.stage2.processors.absorption import AbsorptionProcessor
-from src.stage2.processors.volatility import VolatilityProcessor
 from src.stage2.processors.structure import StructureProcessor
 from src.stage2.processors.funding_oi import FundingOIProcessor
 from src.stage2.processors.liquidations import LiquidationProcessor
-from src.stage2.processors.regime import RegimeClassifier
 
 logger = structlog.get_logger(__name__)
+
+
+class VolatilityProcessor:
+    """Stub VolatilityProcessor - actual file deleted, using AlphaStateProcessor for V3"""
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        self._features = VolatilityFeatures()
+    
+    def add_bar(self, bar) -> VolatilityFeatures:
+        return self._features
+    
+    def get_atr_5m(self) -> float:
+        return self._features.atr_5m
+    
+    def bootstrap(self, **kwargs):
+        pass
+
+
+class RegimeClassifier:
+    """Stub RegimeClassifier - actual file deleted, using AlphaStateProcessor for V3"""
+    def __init__(self, symbol: str, interval_ms: int = 60000):
+        self.symbol = symbol
+        self._default_classification = RegimeClassification(
+            regime=Regime.CHOP,
+            confidence=0.5,
+            compression_score=0.0,
+            expansion_score=0.0,
+            chop_score=1.0,
+            reason="stub_classifier"
+        )
+    
+    def classify(self, volatility, structure, order_flow, absorption) -> 'RegimeClassification':
+        return self._default_classification
 
 
 @dataclass

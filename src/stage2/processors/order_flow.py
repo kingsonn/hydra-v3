@@ -51,6 +51,13 @@ class OrderFlowProcessor:
         # Price buffer for price_change_5m (5 min = 1200 bars at 250ms)
         self._price_buffer: deque[float] = deque(maxlen=1200)
         
+        # Timestamps for staleness detection
+        self._last_bar_timestamp_ms: int = 0
+        
+        # EMA smoothing for delta_velocity (alpha = 0.3 for ~3-bar smoothing)
+        self._delta_velocity_ema = 0.0
+        self._delta_ema_alpha = 0.3
+        
         # Cached features
         self._last_features = OrderFlowFeatures()
         self._last_moi_1s = 0.0
@@ -93,8 +100,14 @@ class OrderFlowProcessor:
         # Store raw MOI for moi_std calculation
         self._moi_history.append(moi_1s)
         
-        # Delta velocity: MOI_1s change
-        delta_velocity = moi_1s - self._last_moi_1s
+        # Delta velocity: MOI_1s change with EMA smoothing to reduce noise
+        raw_delta = moi_1s - self._last_moi_1s
+        self._delta_velocity_ema = (
+            self._delta_ema_alpha * raw_delta + 
+            (1 - self._delta_ema_alpha) * self._delta_velocity_ema
+        )
+        delta_velocity = self._delta_velocity_ema
+        
         self._moi_1s_history.append(moi_1s)
         self._last_moi_1s = moi_1s
         
@@ -157,19 +170,28 @@ class OrderFlowProcessor:
         """
         Get price change over 5 minutes
         price_change_5m = (price_now - price_5m_ago) / price_5m_ago
+        
+        FIX: Corrected index calculation - use first element if buffer is full,
+        otherwise use oldest available.
         """
         if len(self._price_buffer) < 2:
             return 0.0
         
         price_now = self._price_buffer[-1]
-        # 5 min = 1200 bars at 250ms
-        idx = min(len(self._price_buffer) - 1, 1199)
-        price_5m_ago = self._price_buffer[-(idx + 1)]
+        # Use the oldest price in buffer (first element)
+        # If buffer is full (1200 bars), this is exactly 5 minutes ago
+        price_5m_ago = self._price_buffer[0]
         
         if price_5m_ago == 0:
             return 0.0
         
         return (price_now - price_5m_ago) / price_5m_ago
+    
+    def get_last_update_age_ms(self) -> int:
+        """Get age of last update in milliseconds for staleness detection"""
+        if self._last_bar_timestamp_ms == 0:
+            return 0
+        return int(time.time() * 1000) - self._last_bar_timestamp_ms
 
 
 class MultiSymbolOrderFlowProcessor:

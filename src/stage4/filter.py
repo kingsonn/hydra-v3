@@ -11,7 +11,30 @@ from typing import Optional, Dict
 from enum import Enum
 
 from src.stage3.models import Signal, Direction
-from src.stage2.processors.regime import PAIR_THRESHOLDS, PairThresholds
+from dataclasses import dataclass as dc_dataclass
+
+
+# Stub PairThresholds - actual file deleted, using AlphaStateProcessor for V3
+@dc_dataclass
+class PairThresholds:
+    """Stub thresholds - V3 pipeline uses AlphaStateProcessor"""
+    vol_expansion_high: float = 1.30
+    vol_compression_low: float = 0.75
+    aggression_high: float = 1.15
+    aggression_low: float = 0.85
+    moi_std_high_pct: float = 60.0
+    moi_std_low_pct: float = 40.0
+    delta_flip_low: float = 2.0
+    delta_flip_high: float = 5.0
+    absorption_z_noise: float = 1.0
+    absorption_z_spike: float = 2.5
+    value_width_compression: float = 0.65
+    value_width_wide: float = 1.05
+    time_inside_compression: float = 0.60
+
+
+# Stub - V3 pipeline doesn't use per-pair thresholds
+PAIR_THRESHOLDS = {}
 
 
 # LVN distance threshold (in ATR units)

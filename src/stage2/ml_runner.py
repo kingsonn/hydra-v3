@@ -20,7 +20,6 @@ from src.stage2.ml_dashboard import (
     ml_broadcast_state, ml_app, start_ml_dashboard_async, 
     load_ml_models, ML_MODELS
 )
-from src.collectors.klines import bootstrap_all_symbols
 
 logger = structlog.get_logger(__name__)
 
@@ -78,32 +77,10 @@ class MLTestRunner:
         ML_MODELS.update(load_ml_models())
         logger.info("ml_models_ready", count=len(ML_MODELS))
         
-        # Step 2: Bootstrap ATR from historical klines
-        logger.info("bootstrapping_atr_data", symbols=len(self.symbols))
-        try:
-            atr_data, _ = await bootstrap_all_symbols(self.symbols)
-            
-            for symbol in self.symbols:
-                if symbol in atr_data:
-                    self.stage2.bootstrap_volatility(
-                        symbol=symbol,
-                        tr_5m_values=atr_data[symbol].tr_5m_deque,
-                        tr_1h_values=atr_data[symbol].tr_1h_deque,
-                        atr_5m=atr_data[symbol].atr_5m,
-                        atr_1h=atr_data[symbol].atr_1h,
-                        last_close_5m=atr_data[symbol].last_close_5m,
-                        last_close_1h=atr_data[symbol].last_close_1h,
-                    )
-                    logger.info(
-                        "symbol_atr_bootstrapped",
-                        symbol=symbol,
-                        atr_5m=f"{atr_data[symbol].atr_5m:.4f}",
-                        atr_1h=f"{atr_data[symbol].atr_1h:.4f}",
-                    )
-        except Exception as e:
-            logger.error("bootstrap_failed", error=str(e))
+        # NOTE: ATR bootstrap removed - use GlobalPipelineRunnerV3 for new pipeline
+        logger.info("skipping_old_bootstrap", reason="Use GlobalPipelineRunnerV3 for V3 pipeline")
         
-        # Step 3: Initialize Stage 1
+        # Step 2: Initialize Stage 1
         await self.stage1.initialize()
         
         # Step 4: Start all components

@@ -1,6 +1,8 @@
 """
 Global Dashboard - All 8 Pairs Pipeline View
-Shows all 5 stages: Data Ingestion → Regime → Signal → Filter → ML Prediction → Trade
+Shows all stages: Data Ingestion → Regime → Signal → ML Prediction → Trade
+
+Stage 4/4.5 REMOVED per audit - filters destroyed edge via over-filtering.
 
 WebSocket-based real-time updates for all pairs through the complete pipeline.
 """
@@ -55,7 +57,7 @@ class PipelineState:
     last_funding_ms: int = 0
     price: float = 0.0
     
-    # Stage 2: Regime Classification
+    # Stage 2: Regime Classification (legacy)
     regime: str = "UNKNOWN"
     regime_rejected: bool = False
     regime_confidence: float = 0.0
@@ -64,7 +66,7 @@ class PipelineState:
     chop_score: int = 0
     time_in_regime: float = 0.0
     
-    # Key metrics from Stage 2
+    # Key metrics from Stage 2 (legacy)
     funding_z: float = 0.0
     oi_delta_5m: float = 0.0
     liq_imbalance: float = 0.0
@@ -73,28 +75,66 @@ class PipelineState:
     absorption_z: float = 0.0
     vol_regime: str = "MID"
     
+    # ========== V3 AlphaState Variables ==========
+    # Funding
+    funding_rate: float = 0.0
+    funding_time_at_extreme_hours: float = 0.0
+    
+    # OI Changes
+    oi_change_1h: float = 0.0
+    oi_change_4h: float = 0.0
+    oi_change_24h: float = 0.0
+    
+    # Price Changes
+    price_change_1h: float = 0.0
+    price_change_4h: float = 0.0
+    price_change_24h: float = 0.0
+    
+    # Trend
+    trend_direction: str = "NEUTRAL"
+    trend_strength: float = 0.0
+    ema_20: float = 0.0
+    ema_50: float = 0.0
+    rsi_14: float = 50.0
+    
+    # ATR and Volatility
+    atr_short: float = 0.0
+    atr_long: float = 0.0
+    vol_expansion_ratio: float = 1.0
+    
+    # Liquidations
+    liq_long_usd_1h: float = 0.0
+    liq_short_usd_1h: float = 0.0
+    liq_usd_1h: float = 0.0
+    liq_imbalance_1h: float = 0.0
+    liq_imbalance_4h: float = 0.0
+    cascade_active: bool = False
+    liq_exhaustion: bool = False
+    
+    # Price Ranges
+    high_4h: float = 0.0
+    low_4h: float = 0.0
+    high_24h: float = 0.0
+    low_24h: float = 0.0
+    
+    # V3 Regime
+    v3_regime: str = "UNKNOWN"
+    
     # Stage 3: Signal Detection
     signal_fired: bool = False
     signal_direction: str = "NONE"
     signal_strength: float = 0.0
     signal_reasons: List[str] = field(default_factory=list)
     stage3_veto: str = ""
+    signal_type: str = ""
     
-    # Stage 4: Structural Filter
-    stage4_pass: bool = False
-    stage4_reason: str = ""
-    dist_lvn: float = 0.0
-    vah: float = 0.0
-    val: float = 0.0
+    # Stage 4/4.5 REMOVED - filters destroyed edge via over-filtering
+    # Signals now go directly from Stage 3 to Stage 5
     
-    # Stage 4.5: Orderflow Confirmation
-    stage45_pass: bool = False
-    stage45_reason: str = ""
-    
-    # Stage 5: ML Prediction V3 (probability-based)
+    # Stage 5: ML Prediction V3 (probability-based) - DISABLED for V3
     stage5_pass: bool = False
-    prob_60: float = 0.0  # Probability of TP hit in 60s
-    prob_300: float = 0.0  # Probability of TP hit in 300s
+    prob_60: float = 0.0
+    prob_300: float = 0.0
     percentile_60: float = 0.0
     percentile_300: float = 0.0
     model_used: str = ""
@@ -116,7 +156,7 @@ class PipelineState:
             "last_trade_ms": self.last_trade_ms,
             "last_book_ms": self.last_book_ms,
             "last_funding_ms": self.last_funding_ms,
-            # Stage 2
+            # Stage 2 (legacy)
             "regime": self.regime,
             "regime_rejected": self.regime_rejected,
             "regime_confidence": self.regime_confidence,
@@ -124,29 +164,50 @@ class PipelineState:
             "compression_score": self.compression_score,
             "chop_score": self.chop_score,
             "time_in_regime": self.time_in_regime,
-            "funding_z": self.funding_z,
-            "oi_delta_5m": self.oi_delta_5m,
-            "liq_imbalance": self.liq_imbalance,
             "moi_250ms": self.moi_250ms,
             "delta_velocity": self.delta_velocity,
             "absorption_z": self.absorption_z,
             "vol_regime": self.vol_regime,
+            # V3 AlphaState
+            "funding_rate": self.funding_rate,
+            "funding_z": self.funding_z,
+            "funding_time_at_extreme_hours": self.funding_time_at_extreme_hours,
+            "oi_change_1h": self.oi_change_1h,
+            "oi_change_4h": self.oi_change_4h,
+            "oi_change_24h": self.oi_change_24h,
+            "oi_delta_5m": self.oi_delta_5m,
+            "price_change_1h": self.price_change_1h,
+            "price_change_4h": self.price_change_4h,
+            "price_change_24h": self.price_change_24h,
+            "trend_direction": self.trend_direction,
+            "trend_strength": self.trend_strength,
+            "ema_20": self.ema_20,
+            "ema_50": self.ema_50,
+            "rsi_14": self.rsi_14,
+            "atr_short": self.atr_short,
+            "atr_long": self.atr_long,
+            "vol_expansion_ratio": self.vol_expansion_ratio,
+            "liq_long_usd_1h": self.liq_long_usd_1h,
+            "liq_short_usd_1h": self.liq_short_usd_1h,
+            "liq_usd_1h": self.liq_usd_1h,
+            "liq_imbalance": self.liq_imbalance,
+            "liq_imbalance_1h": self.liq_imbalance_1h,
+            "liq_imbalance_4h": self.liq_imbalance_4h,
+            "cascade_active": self.cascade_active,
+            "liq_exhaustion": self.liq_exhaustion,
+            "high_4h": self.high_4h,
+            "low_4h": self.low_4h,
+            "high_24h": self.high_24h,
+            "low_24h": self.low_24h,
+            "v3_regime": self.v3_regime,
             # Stage 3
             "signal_fired": self.signal_fired,
             "signal_direction": self.signal_direction,
             "signal_strength": self.signal_strength,
             "signal_reasons": self.signal_reasons,
             "stage3_veto": self.stage3_veto,
-            # Stage 4
-            "stage4_pass": self.stage4_pass,
-            "stage4_reason": self.stage4_reason,
-            "dist_lvn": self.dist_lvn,
-            "vah": self.vah,
-            "val": self.val,
-            # Stage 4.5
-            "stage45_pass": self.stage45_pass,
-            "stage45_reason": self.stage45_reason,
-            # Stage 5
+            "signal_type": self.signal_type,
+            # Stage 5 (disabled for V3)
             "stage5_pass": self.stage5_pass,
             "prob_60": self.prob_60,
             "prob_300": self.prob_300,
@@ -322,7 +383,7 @@ DASHBOARD_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hydra Global Pipeline Dashboard</title>
+    <title>Hydra V3 Pipeline Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -347,6 +408,7 @@ DASHBOARD_HTML = """
             -webkit-text-fill-color: transparent;
             margin-bottom: 5px;
         }
+        .header .subtitle { font-size: 0.75rem; color: #7c3aed; margin-bottom: 5px; }
         .header .status { font-size: 0.85rem; color: #888; }
         .status.connected { color: #00ff88; }
         .status.disconnected { color: #ff4444; }

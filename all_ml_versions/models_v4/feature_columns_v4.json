@@ -1,0 +1,19 @@
+[
+  "vol_10s",
+  "vol_1m",
+  "vol_5m",
+  "atr_pct",
+  "vol_of_vol",
+  "vol_acceleration",
+  "flow_z",
+  "flow_persistence",
+  "flow_entropy",
+  "impact_efficiency",
+  "impact_stability",
+  "resiliency",
+  "intensity_raw",
+  "intensity_accel",
+  "absorption_raw",
+  "hour_sin",
+  "hour_cos"
+]

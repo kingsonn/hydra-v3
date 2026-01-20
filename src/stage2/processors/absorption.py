@@ -41,8 +41,9 @@ class AbsorptionProcessor:
         self._last_depth: Optional[DepthSnapshot] = None
         self._refill_events: deque[Tuple[int, float]] = deque(maxlen=50)
         self._sweep_side: Optional[str] = None  # "ASK" or "BID"
-        self._pre_sweep_depth: Dict[str, float] = {"bid": 0.0, "ask": 0.0}
+        self._post_sweep_depth: Dict[str, float] = {"bid": 0.0, "ask": 0.0}
         self._sweep_timestamp_ms: Optional[int] = None
+        self._sweep_expiry_ms: int = 10000  # Refill tracking expires after 10s
         
         # For sweep detection
         self._level_clear_events: deque[int] = deque(maxlen=20)  # timestamps
@@ -113,76 +114,98 @@ class AbsorptionProcessor:
     
     def _compute_absorption(self, traded_volume: float, price_change: float) -> float:
         """
-        Absorption = traded_volume / abs(price_change)
-        High absorption = passive orders absorbing aggression
+        Absorption = high volume with low price impact.
+        Returns higher values when price is stable despite volume.
+        Formula: volume / (price_impact_bps + floor)
         """
-        if abs(price_change) < 1e-9:
+        if traded_volume < 1e-6:
             return 0.0
-        return traded_volume / abs(price_change)
+        # Convert price change to basis points for normalization
+        price_impact_bps = abs(price_change) * 10000
+        # Higher absorption = more volume absorbed per unit of price impact
+        # Floor of 0.1 bps prevents division issues when price doesn't move
+        return traded_volume / (price_impact_bps + 0.1)
     
     def _detect_sweep(self, current: DepthSnapshot) -> bool:
         """
-        Detect liquidity sweep: multiple levels cleared rapidly
+        Detect liquidity sweep: multiple levels cleared rapidly.
+        Hardened thresholds: require 90% cleared on 4+ levels to avoid noise.
         """
         if self._last_depth is None:
             return False
         
         # Check if multiple bid or ask levels got significantly reduced
+        # Require 90% reduction (0.1 threshold) to count as "cleared"
         bid_cleared = 0
         ask_cleared = 0
         
         for i in range(min(5, len(current.bid_levels_qty), len(self._last_depth.bid_levels_qty))):
-            if current.bid_levels_qty[i] < self._last_depth.bid_levels_qty[i] * 0.3:
-                bid_cleared += 1
+            if self._last_depth.bid_levels_qty[i] > 1e-9:  # Avoid div by zero
+                if current.bid_levels_qty[i] < self._last_depth.bid_levels_qty[i] * 0.1:
+                    bid_cleared += 1
         
         for i in range(min(5, len(current.ask_levels_qty), len(self._last_depth.ask_levels_qty))):
-            if current.ask_levels_qty[i] < self._last_depth.ask_levels_qty[i] * 0.3:
-                ask_cleared += 1
+            if self._last_depth.ask_levels_qty[i] > 1e-9:  # Avoid div by zero
+                if current.ask_levels_qty[i] < self._last_depth.ask_levels_qty[i] * 0.1:
+                    ask_cleared += 1
         
-        # Sweep if 3+ levels cleared on either side
-        if bid_cleared >= 3 or ask_cleared >= 3:
+        # Sweep if 4+ levels cleared on either side (hardened from 3)
+        if bid_cleared >= 4 or ask_cleared >= 4:
             self._level_clear_events.append(current.timestamp_ms)
-            # Store pre-sweep depth and side
-            if ask_cleared >= 3:
+            # Store POST-sweep depth (current depleted depth) and side
+            if ask_cleared >= 4:
                 self._sweep_side = "ASK"
             else:
                 self._sweep_side = "BID"
-            self._pre_sweep_depth = {
-                "bid": self._last_depth.bid_depth,
-                "ask": self._last_depth.ask_depth,
+            # CRITICAL FIX: Store POST-sweep depth, not pre-sweep
+            self._post_sweep_depth = {
+                "bid": current.bid_depth,
+                "ask": current.ask_depth,
             }
             self._sweep_timestamp_ms = current.timestamp_ms
             return True
         
-        # Also check for rapid consecutive clears
+        # Consecutive clears within 5s also counts
         now = current.timestamp_ms
         recent_clears = sum(1 for t in self._level_clear_events if now - t < 5000)
-        return recent_clears >= 3
+        return recent_clears >= 4
     
     def _compute_refill_rate(self, current: DepthSnapshot) -> float:
         """
-        Refill rate = normalized depth recovery after sweep
-        Side-aware: tracks refill on the swept side only
-        Normalized by pre-sweep baseline depth
+        Refill rate = depth recovery after sweep, compared to POST-sweep depleted depth.
+        Side-aware: tracks refill on the swept side only.
+        Only valid 0.5s - 10s after sweep.
+        Returns: refill amount per second, normalized by post-sweep depth.
         """
-        if self._last_depth is None or self._sweep_timestamp_ms is None:
+        if self._sweep_timestamp_ms is None:
             return 0.0
         
         time_delta_s = (current.timestamp_ms - self._sweep_timestamp_ms) / 1000.0
-        if time_delta_s < 0.01:
+        
+        # Only valid in 0.5s - 10s window after sweep
+        if time_delta_s < 0.5 or time_delta_s > 10.0:
+            # Expire the sweep tracking after 10s
+            if time_delta_s > 10.0:
+                self._sweep_timestamp_ms = None
             return 0.0
         
-        # Side-aware refill
+        # CRITICAL FIX: Compare current depth to POST-sweep depth (depleted state)
+        # Refill = how much depth has recovered since the sweep
         if self._sweep_side == "ASK":
-            refill = max(0.0, current.ask_depth - self._pre_sweep_depth["ask"])
-            baseline = max(self._pre_sweep_depth["ask"], 1e-9)
+            post_sweep = self._post_sweep_depth.get("ask", 0.0)
+            refill = current.ask_depth - post_sweep
         else:
-            refill = max(0.0, current.bid_depth - self._pre_sweep_depth["bid"])
-            baseline = max(self._pre_sweep_depth["bid"], 1e-9)
+            post_sweep = self._post_sweep_depth.get("bid", 0.0)
+            refill = current.bid_depth - post_sweep
         
-        # Normalized refill speed
+        if refill <= 0:
+            return 0.0
+        
+        # Refill rate = depth recovered per second
+        # Normalize by post-sweep depth to make it comparable across symbols
+        baseline = max(post_sweep, 1000.0)  # Min baseline of $1000
         refill_rate = (refill / baseline) / time_delta_s
-        return refill_rate
+        return min(refill_rate, 10.0)  # Cap at 10 to avoid outliers
     
     def _update_stats(self) -> None:
         """Update rolling mean/std for z-scoring"""

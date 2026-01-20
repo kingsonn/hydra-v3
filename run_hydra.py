@@ -2,6 +2,8 @@
 """
 Hydra Global Pipeline Entry Point
 Proper signal handling for systemd service
+
+Now runs V3 hybrid alpha system by default.
 """
 import asyncio
 import os
@@ -15,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)  # Ensure working directory is correct
 
 import structlog
-from src.dashboard.global_runner import run_global_pipeline
+from src.dashboard.global_runner_v3 import run_global_pipeline_v3
 
 logger = structlog.get_logger(__name__)
 
@@ -49,8 +51,8 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        # Run the pipeline
-        loop.run_until_complete(run_global_pipeline())
+        # Run the V3 pipeline
+        loop.run_until_complete(run_global_pipeline_v3())
     except KeyboardInterrupt:
         logger.info("keyboard_interrupt")
     finally:

@@ -49,12 +49,22 @@ class LiquidationBucket:
 
 @dataclass
 class LiquidationStats:
-    """Aggregated liquidation statistics with rolling buckets (30s, 2m, 5m)"""
+    """Aggregated liquidation statistics with rolling buckets (30s, 2m, 5m, 1h)"""
     timestamp_ms: int
     symbol: str
     bucket_30s: LiquidationBucket
     bucket_2m: LiquidationBucket
     bucket_5m: LiquidationBucket
+    bucket_1h: LiquidationBucket = None
+    
+    def __post_init__(self):
+        if self.bucket_1h is None:
+            self.bucket_1h = LiquidationBucket(window_ms=3600_000)
+    
+    @property
+    def liq_usd_1h(self) -> float:
+        """Total liquidation USD in last hour"""
+        return self.bucket_1h.total_usd if self.bucket_1h else 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +79,10 @@ class LiquidationStats:
             "liq_long_usd_5m": self.bucket_5m.long_usd,
             "liq_short_usd_5m": self.bucket_5m.short_usd,
             "imbalance_5m": self.bucket_5m.imbalance,
+            "liq_long_usd_1h": self.bucket_1h.long_usd if self.bucket_1h else 0.0,
+            "liq_short_usd_1h": self.bucket_1h.short_usd if self.bucket_1h else 0.0,
+            "liq_usd_1h": self.liq_usd_1h,
+            "imbalance_1h": self.bucket_1h.imbalance if self.bucket_1h else 0.0,
         }
 
 
@@ -113,15 +127,22 @@ class DerivativesCollector:
         # Message queue for decoupling WS receive from processing
         self._liq_msg_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5000)
         
-        # Rolling buckets per symbol (30s, 2m, 5m windows)
+        # Rolling buckets per symbol (30s, 2m, 5m, 1h windows)
         self._liq_buckets: Dict[str, Dict[str, LiquidationBucket]] = {
             s: {
                 "30s": LiquidationBucket(window_ms=30_000),
                 "2m": LiquidationBucket(window_ms=120_000),
                 "5m": LiquidationBucket(window_ms=300_000),
+                "1h": LiquidationBucket(window_ms=3600_000),
             }
             for s in self.symbols
         }
+        
+        # 5-min interval snapshots for long-term rolling memory
+        self._liq_5m_snapshots: Dict[str, deque] = {
+            s: deque(maxlen=96) for s in self.symbols  # 8 hours of 5-min data
+        }
+        self._last_5m_snapshot_time: Dict[str, int] = {s: 0 for s in self.symbols}
         
         # State
         self._running = False
@@ -196,11 +217,12 @@ class DerivativesCollector:
                 except Exception:
                     pass
             
-            # Create new client
+            # Create new client with standard settings (httpx handles DNS internally)
             self._client = httpx.AsyncClient(
                 base_url=settings.BINANCE_REST_BASE,
-                timeout=httpx.Timeout(30.0, connect=10.0),
+                timeout=httpx.Timeout(30.0, connect=10.0, pool=10.0),
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                headers={"User-Agent": "HYDRA-Trading-Bot/1.0"},
             )
             self._client_created_time = now
             logger.debug("http_client_refreshed")
@@ -640,6 +662,7 @@ class DerivativesCollector:
                     cutoff_30s = now_ms - 30_000
                     cutoff_2m = now_ms - 120_000
                     cutoff_5m = now_ms - 300_000
+                    cutoff_1h = now_ms - 3600_000
                     
                     for ts, liq in self._liquidations:
                         if liq.symbol != symbol:
@@ -676,6 +699,27 @@ class DerivativesCollector:
                             else:
                                 bucket.short_usd += notional
                                 bucket.short_count += 1
+                        
+                        # 1h bucket
+                        if liq.timestamp_ms >= cutoff_1h:
+                            bucket = self._liq_buckets[symbol]["1h"]
+                            if liq.side == Side.BUY:
+                                bucket.long_usd += notional
+                                bucket.long_count += 1
+                            else:
+                                bucket.short_usd += notional
+                                bucket.short_count += 1
+                    
+                    # Store 5-min snapshot for long-term rolling memory
+                    last_snapshot = self._last_5m_snapshot_time[symbol]
+                    if now_ms - last_snapshot >= 300_000:  # 5 minutes
+                        self._liq_5m_snapshots[symbol].append({
+                            "timestamp_ms": now_ms,
+                            "long_usd": self._liq_buckets[symbol]["5m"].long_usd,
+                            "short_usd": self._liq_buckets[symbol]["5m"].short_usd,
+                            "imbalance": self._liq_buckets[symbol]["5m"].imbalance,
+                        })
+                        self._last_5m_snapshot_time[symbol] = now_ms
                     
                     # Emit stats callback
                     if self.on_liq_stats:
@@ -685,6 +729,7 @@ class DerivativesCollector:
                             bucket_30s=self._liq_buckets[symbol]["30s"],
                             bucket_2m=self._liq_buckets[symbol]["2m"],
                             bucket_5m=self._liq_buckets[symbol]["5m"],
+                            bucket_1h=self._liq_buckets[symbol]["1h"],
                         )
                         await self._safe_callback(self.on_liq_stats, stats)
             
@@ -737,7 +782,18 @@ class DerivativesCollector:
             bucket_30s=self._liq_buckets[symbol]["30s"],
             bucket_2m=self._liq_buckets[symbol]["2m"],
             bucket_5m=self._liq_buckets[symbol]["5m"],
+            bucket_1h=self._liq_buckets[symbol]["1h"],
         )
+    
+    def get_liq_5m_snapshots(self, symbol: str) -> List[Dict]:
+        """Get 5-min interval snapshots for long-term rolling memory"""
+        return list(self._liq_5m_snapshots.get(symbol, []))
+    
+    def get_liq_usd_1h(self, symbol: str) -> float:
+        """Get total liquidation USD in last hour"""
+        if symbol not in self._liq_buckets:
+            return 0.0
+        return self._liq_buckets[symbol]["1h"].total_usd
     
     def get_liq_buckets(self, symbol: str) -> Optional[Dict[str, LiquidationBucket]]:
         """Get raw liquidation buckets for symbol"""

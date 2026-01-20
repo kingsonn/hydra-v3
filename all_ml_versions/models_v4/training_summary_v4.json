@@ -1,0 +1,46 @@
+{
+  "version": "v4",
+  "objective": "market_quality_prediction",
+  "labeling": "MFE_MAE_ratio_non_circular",
+  "features": [
+    "vol_10s",
+    "vol_1m",
+    "vol_5m",
+    "atr_pct",
+    "vol_of_vol",
+    "vol_acceleration",
+    "flow_z",
+    "flow_persistence",
+    "flow_entropy",
+    "impact_efficiency",
+    "impact_stability",
+    "resiliency",
+    "intensity_raw",
+    "intensity_accel",
+    "absorption_raw",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "symbols": [
+    "XRPUSDT",
+    "DOGEUSDT",
+    "LTCUSDT",
+    "ADAUSDT"
+  ],
+  "horizons": [
+    60,
+    300
+  ],
+  "mfe_multiplier": 2.0,
+  "models_trained": [
+    "XRPUSDT_quality_60",
+    "XRPUSDT_quality_300",
+    "DOGEUSDT_quality_60",
+    "DOGEUSDT_quality_300",
+    "LTCUSDT_quality_60",
+    "LTCUSDT_quality_300",
+    "ADAUSDT_quality_60",
+    "ADAUSDT_quality_300"
+  ],
+  "trained_at": "2026-01-18T08:19:42.567231+00:00"
+}

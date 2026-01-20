@@ -18,7 +18,6 @@ from src.stage1 import Stage1Orchestrator
 from src.stage2.orchestrator import Stage2Orchestrator
 from src.stage2.dashboard import broadcast_state, app, start_dashboard_async
 from src.stage2.models import MarketState
-from src.collectors.klines import bootstrap_all_symbols
 
 logger = structlog.get_logger(__name__)
 
@@ -73,37 +72,10 @@ class IntegratedRunner:
             dashboard_port=self.dashboard_port if self.enable_dashboard else "disabled",
         )
         
-        # Step 1: Bootstrap ATR and volatility from historical klines
-        logger.info("bootstrapping_atr_volatility", symbols=len(self.symbols))
-        try:
-            atr_data, vol_data = await bootstrap_all_symbols(self.symbols)
-            
-            # Apply ATR and volatility bootstrap to Stage 2 processors
-            for symbol in self.symbols:
-                if symbol in atr_data:
-                    vol_history = vol_data[symbol].vol_5m_history if symbol in vol_data else None
-                    self.stage2.bootstrap_volatility(
-                        symbol=symbol,
-                        tr_5m_values=atr_data[symbol].tr_5m_deque,
-                        tr_1h_values=atr_data[symbol].tr_1h_deque,
-                        atr_5m=atr_data[symbol].atr_5m,
-                        atr_1h=atr_data[symbol].atr_1h,
-                        last_close_5m=atr_data[symbol].last_close_5m,
-                        last_close_1h=atr_data[symbol].last_close_1h,
-                        vol_5m_history=vol_history,
-                    )
-                    logger.info(
-                        "symbol_bootstrapped",
-                        symbol=symbol,
-                        atr_5m=f"{atr_data[symbol].atr_5m:.4f}",
-                        atr_1h=f"{atr_data[symbol].atr_1h:.4f}",
-                        vol_history_size=len(vol_history) if vol_history else 0,
-                    )
-        except Exception as e:
-            logger.error("bootstrap_failed", error=str(e))
-            # Continue without bootstrap - will have cold start
+        # NOTE: ATR bootstrap removed - use GlobalPipelineRunnerV3 for new pipeline
+        logger.info("skipping_old_bootstrap", reason="Use GlobalPipelineRunnerV3 for V3 pipeline")
         
-        # Step 2: Initialize Stage 1
+        # Step 1: Initialize Stage 1
         await self.stage1.initialize()
         
         # Step 3: Start all components

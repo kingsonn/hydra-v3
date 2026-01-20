@@ -1,6 +1,8 @@
 """
-Global Pipeline Runner - Runs all 6 stages with Global Dashboard
-Connects Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 4.5 → Stage 5 → Stage 6
+Global Pipeline Runner - Runs all stages with Global Dashboard
+Connects Stage 1 → Stage 2 → Stage 3 → Stage 5 → Stage 6
+
+Stage 4/4.5 REMOVED per audit - filters destroyed edge via over-filtering.
 
 Emits real-time pipeline state for each symbol to the global dashboard.
 
@@ -8,7 +10,7 @@ Startup sequence:
 1. Bootstrap ATR and volatility from historical klines (no cold start)
 2. Initialize Stage 1 data collection
 3. Start Stage 2 feature computation
-4. Start Stage 3 thesis engine with Stage 4/4.5/5
+4. Start Stage 3 thesis engine with Stage 5 ML gate
 5. Launch global dashboard
 """
 import asyncio
@@ -26,12 +28,12 @@ from src.stage2.orchestrator import Stage2Orchestrator
 from src.stage2.models import MarketState, Regime
 from src.stage3.thesis_engine import ThesisEngine, PROB_MIN_THRESHOLD
 from src.stage3.models import Thesis, Direction
-from src.stage4.filter import FilterResult
+# Stage 4/4.5 REMOVED - filters destroyed edge via over-filtering
+# FilterResult import removed
 from src.stage5.predictor_v3 import PredictionResultV3
 from src.stage6.position_sizer import PositionSizer
 from src.stage6.models import PositionResult
 from src.stage7.trade_manager import TradeManager
-from src.collectors.klines import bootstrap_all_symbols
 
 from src.dashboard.global_dashboard import (
     broadcast_pipeline_state,
@@ -67,16 +69,16 @@ class SymbolTracker:
 
 class GlobalPipelineRunner:
     """
-    Runs the complete 6-stage pipeline for all symbols with real-time dashboard.
+    Runs the complete pipeline for all symbols with real-time dashboard.
     
     Pipeline Flow:
     1. Stage 1: Data Ingestion (WebSocket trades, orderbook, REST derivatives)
     2. Stage 2: Feature Computation + Regime Classification
     3. Stage 3: Signal Detection (thesis generation)
-    4. Stage 4: Structural Location Filter
-    5. Stage 4.5: Orderflow Confirmation
-    6. Stage 5: ML Prediction + Percentile Gate
-    7. Stage 6: Position Sizing (2 tranches with SL/TP)
+    4. Stage 5: ML Prediction + Probability Gate
+    5. Stage 6: Position Sizing (2 tranches with SL/TP)
+    
+    Stage 4/4.5 REMOVED - see audit notes.
     """
     
     def __init__(
@@ -199,8 +201,7 @@ class GlobalPipelineRunner:
         # Process through Stage 3 (which internally calls Stage 4, 4.5, 5)
         thesis = self.thesis_engine.process(state)
         
-        # Get filter and ML results
-        filter_result = self.thesis_engine.get_filter_result(symbol)
+        # Get ML results (Stage 4/4.5 filters REMOVED)
         ml_prediction = self.thesis_engine.get_ml_prediction(symbol)
         
         # Build complete pipeline state dict with ALL Stage 2 values
@@ -210,40 +211,12 @@ class GlobalPipelineRunner:
         # Stage 3: Signal fires if direction is set
         signal_fired = thesis.direction != Direction.NONE
         
-        # Stage 4: Check filter result or veto_reason
-        stage4_pass = filter_result.allowed if filter_result else False
-        stage4_reason = filter_result.reason.value if filter_result else ""
-        
-        if thesis.veto_reason and "Stage 4:" in thesis.veto_reason:
-            stage4_pass = False
-            stage4_reason = thesis.veto_reason.replace("Stage 4: ", "")
-        
-        # Stage 4.5: Pass if we got past Stage 4 and veto is NOT at Stage 4.5
-        # (i.e., veto is at Stage 5 or no veto at all)
-        stage45_pass = False
-        stage45_reason = ""
-        if thesis.veto_reason and "Stage 4.5:" in thesis.veto_reason:
-            # Stage 4.5 failed
-            stage45_pass = False
-            stage45_reason = thesis.veto_reason.replace("Stage 4.5: ", "")
-        elif stage4_pass and signal_fired:
-            # Stage 4 passed, check if we got to Stage 5 or beyond
-            if thesis.veto_reason and "Stage 5:" in thesis.veto_reason:
-                # Stage 4.5 passed but Stage 5 failed
-                stage45_pass = True
-                stage45_reason = "confirmed"
-            elif thesis.allowed:
-                # Everything passed
-                stage45_pass = True
-                stage45_reason = "confirmed"
-            elif not thesis.veto_reason:
-                # No veto at all but not allowed (shouldn't happen)
-                stage45_pass = False
-                stage45_reason = "unknown"
+        # Stage 4/4.5 REMOVED - filters destroyed edge via over-filtering
+        # Signals now go directly from Stage 3 to Stage 5
         
         # Stage 5 status - only pass if both probabilities meet minimum threshold
         stage5_pass = False
-        if ml_prediction and stage45_pass:
+        if ml_prediction and signal_fired and thesis.allowed:
             prob_60_ok = ml_prediction.prob_60 >= PROB_MIN_THRESHOLD
             prob_300_ok = ml_prediction.prob_300 >= PROB_MIN_THRESHOLD
             stage5_pass = prob_60_ok and prob_300_ok
@@ -510,24 +483,16 @@ class GlobalPipelineRunner:
             "signal_reasons": [s.name for s in thesis.reasons] if thesis.reasons else [],
             "stage3_veto": thesis.veto_reason or "",
             
-            # ===== STAGE 4: Structural Filter =====
-            "stage4_pass": stage4_pass,
-            "stage4_reason": stage4_reason,
-            "dist_lvn": filter_result.dist_lvn if filter_result else state.structure.dist_lvn,
-            "vah": filter_result.vah if filter_result else state.structure.vah,
-            "val": filter_result.val if filter_result else state.structure.val,
-            
-            # ===== STAGE 4.5: Orderflow Confirmation =====
-            "stage45_pass": stage45_pass,
-            "stage45_reason": stage45_reason,
+            # Stage 4/4.5 REMOVED - filters destroyed edge via over-filtering
+            # Signals now go directly from Stage 3 to Stage 5
             
             # ===== STAGE 5: ML Prediction V3 (probability-based) =====
             "stage5_pass": stage5_pass,
-            "prob_60": ml_prediction.prob_60 if (ml_prediction and stage45_pass) else 0.0,
-            "prob_300": ml_prediction.prob_300 if (ml_prediction and stage45_pass) else 0.0,
-            "percentile_60": ml_prediction.percentile_60 if (ml_prediction and stage45_pass) else 0.0,
-            "percentile_300": ml_prediction.percentile_300 if (ml_prediction and stage45_pass) else 0.0,
-            "model_used": ml_prediction.model_300 if (ml_prediction and stage45_pass) else "",
+            "prob_60": ml_prediction.prob_60 if (ml_prediction and signal_fired) else 0.0,
+            "prob_300": ml_prediction.prob_300 if (ml_prediction and signal_fired) else 0.0,
+            "percentile_60": ml_prediction.percentile_60 if (ml_prediction and signal_fired) else 0.0,
+            "percentile_300": ml_prediction.percentile_300 if (ml_prediction and signal_fired) else 0.0,
+            "model_used": ml_prediction.model_300 if (ml_prediction and signal_fired) else "",
             
             # ===== STAGE 6: Position Sizing =====
             "stage6_pass": stage6_pass,
@@ -627,37 +592,11 @@ class GlobalPipelineRunner:
             dashboard_port=self.dashboard_port if self.enable_dashboard else "disabled",
         )
         
-        # Step 1: Bootstrap ATR and volatility from historical klines
-        logger.info("bootstrapping_atr_volatility", symbols=len(self.symbols))
-        try:
-            atr_data, vol_data = await bootstrap_all_symbols(self.symbols)
-            
-            # Apply ATR and volatility bootstrap to Stage 2 processors
-            for symbol in self.symbols:
-                if symbol in atr_data:
-                    vol_history = vol_data[symbol].vol_5m_history if symbol in vol_data else None
-                    self.stage2.bootstrap_volatility(
-                        symbol=symbol,
-                        tr_5m_values=atr_data[symbol].tr_5m_deque,
-                        tr_1h_values=atr_data[symbol].tr_1h_deque,
-                        atr_5m=atr_data[symbol].atr_5m,
-                        atr_1h=atr_data[symbol].atr_1h,
-                        last_close_5m=atr_data[symbol].last_close_5m,
-                        last_close_1h=atr_data[symbol].last_close_1h,
-                        vol_5m_history=vol_history,
-                    )
-                    logger.info(
-                        "symbol_bootstrapped",
-                        symbol=symbol,
-                        atr_5m=f"{atr_data[symbol].atr_5m:.4f}",
-                        atr_1h=f"{atr_data[symbol].atr_1h:.4f}",
-                        vol_history=len(vol_history) if vol_history else 0,
-                    )
-        except Exception as e:
-            logger.error("bootstrap_failed", error=str(e))
-            # Continue without bootstrap - will have cold start
+        # NOTE: ATR bootstrap removed - use GlobalPipelineRunnerV3 for new pipeline
+        # Old volatility bootstrap skipped, Stage 2 stub processor handles this
+        logger.info("skipping_old_bootstrap", reason="Use GlobalPipelineRunnerV3 for V3 pipeline")
         
-        # Step 2: Initialize Stage 1
+        # Step 1: Initialize Stage 1
         await self.stage1.initialize()
         
         # Step 3: Start all components
