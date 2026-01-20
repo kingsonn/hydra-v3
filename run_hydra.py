@@ -12,6 +12,7 @@ Usage:
 """
 import argparse
 import asyncio
+import multiprocessing
 import os
 import signal
 import sys
@@ -83,10 +84,16 @@ def main():
             print("⚠️  REAL TRADING MODE - ACTUAL ORDERS WILL BE PLACED!")
             print("⚠️  This will use REAL money on WEEX exchange!")
             print("=" * 60)
-            response = input("Type 'YES' to confirm: ")
+            sys.stdout.flush()
+            try:
+                response = input("Type 'YES' to confirm: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
+                sys.exit(0)
             if response != "YES":
                 print("Aborted.")
                 sys.exit(0)
+            print("Confirmed. Starting real trading...")
     else:
         print("=" * 60)
         print("PAPER TRADING MODE (simulation only)")
@@ -154,4 +161,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
