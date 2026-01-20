@@ -19,7 +19,7 @@ LAYER 3 - ENTRY TIMING: Tactical entry optimization
 Target: 1-2 signals per day, 0.15%+ edge per trade
 """
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 import structlog
 
@@ -35,7 +35,10 @@ from src.stage3_v3.signals import (
     LiquidationFollowSignal,
     RangeBreakoutSignal,
     ExhaustionReversalSignal,
+    SMACrossover,
 )
+# FIXED (Audit): Removed ADXExpansionMomentum (fake ADX), EMATrendContinuation (duplicate),
+# and CompressionBreakout (merged with RangeBreakout). Kept 5 core signals.
 
 logger = structlog.get_logger(__name__)
 
@@ -162,6 +165,11 @@ class HybridAlphaEngine:
         }
         
         # Signals (per symbol)
+        # FIXED (Audit): Reduced to 5 core signals. Removed:
+        # - ADXExpansionMomentum (fake ADX using trend.strength * 50)
+        # - EMATrendContinuation (duplicate of TrendPullback)
+        # - CompressionBreakout (merged into RangeBreakout)
+        # - StructureBreakRetest (kept but not in core set)
         self.signals: Dict[str, Dict[str, object]] = {
             s: {
                 "funding_trend": FundingTrendSignal(),
@@ -169,6 +177,7 @@ class HybridAlphaEngine:
                 "liquidation_follow": LiquidationFollowSignal(),
                 "range_breakout": RangeBreakoutSignal(),
                 "exhaustion_reversal": ExhaustionReversalSignal(),
+                "sma_crossover": SMACrossover(),  # Best implemented signal per audit
             }
             for s in symbols
         }
@@ -239,6 +248,8 @@ class HybridAlphaEngine:
         # Optional
         volume_ratio: float = 1.0,
         moi_flip_rate: float = 0.0,
+        # 1H bar data from bootstrap (FIXED: Audit - needed for proper timeframe alignment)
+        bar_closes_1h: List[float] = None,
     ) -> Optional[HybridSignal]:
         """
         Main evaluation function implementing decision hierarchy.
@@ -291,7 +302,8 @@ class HybridAlphaEngine:
         # ==========================================
         # LAYER 2: REGIME CLASSIFICATION (Per-Minute)
         # ==========================================
-        trend = self.trend_analyzers[symbol].get_state(current_price)
+        # FIXED (Audit): Pass 1H bar data to TrendAnalyzer for proper timeframe alignment
+        trend = self.trend_analyzers[symbol].get_state(current_price, bar_closes_1h)
         range_vs_atr = (high_4h - low_4h) / atr_14 if atr_14 > 0 else 1.0
         
         if gating.needs_regime_update():
@@ -324,9 +336,14 @@ class HybridAlphaEngine:
         
         # ==========================================
         # LAYER 3: ENTRY TIMING STATE
+        # FIXED (Audit): Now used as actual gate, not just dashboard display
         # ==========================================
         gating.price_vs_ema20 = trend.price_vs_ema20
-        gating.pullback_active = trend.is_pullback_to_ema(threshold_pct=0.5)
+        
+        # Use ATR-relative pullback threshold (0.5 ATR)
+        atr_pct = (atr_14 / current_price * 100) if current_price > 0 else 0.5
+        pullback_threshold = min(0.8, max(0.3, atr_pct * 0.5))  # 0.3-0.8% range
+        gating.pullback_active = abs(trend.price_vs_ema20) < pullback_threshold
         
         # Determine entry state
         if gating.pullback_active:
@@ -335,6 +352,10 @@ class HybridAlphaEngine:
             gating.entry_state = "EXTENDED"
         else:
             gating.entry_state = "WAITING"
+        
+        # FIXED (Audit): EXTENDED state now blocks trend-following signals
+        # Only momentum/breakout signals allowed when EXTENDED
+        entry_allows_trend_signals = gating.entry_state != "EXTENDED"
         
         # ==========================================
         # BUILD MARKET STATE
@@ -373,15 +394,31 @@ class HybridAlphaEngine:
             price_change_24h=price_change_24h,
             price_change_48h=price_change_48h,
             volume_ratio=volume_ratio,
+            bar_closes_1h=bar_closes_1h or [],  # FIXED (Audit): Include 1H bars for signals
         )
         
         # ==========================================
         # SIGNAL EVALUATION
+        # FIXED (Audit): Entry timing + regime now gate signals properly
         # ==========================================
         signals = []
         
+        # Signal categories for regime-based gating
+        TREND_FOLLOWING_SIGNALS = {"funding_trend", "trend_pullback", "sma_crossover"}
+        RANGE_SIGNALS = {"range_breakout"}
+        REVERSAL_SIGNALS = {"exhaustion_reversal", "liquidation_follow"}
+        
         for name, signal_obj in self.signals[symbol].items():
             try:
+                # FIXED (Audit): Block trend-following signals when price is EXTENDED
+                if name in TREND_FOLLOWING_SIGNALS and not entry_allows_trend_signals:
+                    continue  # Skip trend signals when extended from EMA
+                
+                # FIXED (Audit): RANGING regime only allows range-specific signals
+                if regime == MarketRegime.RANGING:
+                    if name not in RANGE_SIGNALS:
+                        continue  # Only range_breakout in ranging markets
+                
                 result = signal_obj.evaluate(state)
                 if result is not None:
                     signals.append(result)

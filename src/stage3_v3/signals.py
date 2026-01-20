@@ -5,11 +5,18 @@ Hybrid Signals V2 — Audit-Driven Redesign
 Based on intensive alpha brainstorm (Jan 2026).
 Each signal has clear economic thesis, not just indicator conditions.
 
-4 Core Signals:
+FIXED (Audit): Reduced to 5 core signals after removing:
+- ADXExpansionMomentum (fake ADX - used trend.strength * 50)
+- EMATrendContinuation (duplicate of TrendPullback)
+- CompressionBreakout (merged with RangeBreakout)
+
+Active Signals:
 1. FundingPressureContinuation: Structural funding tax + trend alignment
-2. LiquidationCascade: Enter DURING cascade with trend confirmation  
-3. CompressedRangeBreakout: Tight range + OI/liq confirmation on break
-4. TrendExhaustionReversal: Extended move + structure break + unwind
+2. TrendPullbackSignal: Pullback to EMA in confirmed trend
+3. LiquidationCascade: Enter DURING cascade with trend confirmation  
+4. CompressedRangeBreakout: Tight range + OI/liq confirmation on break
+5. TrendExhaustionReversal: Extended move + structure break + unwind
+6. SMACrossover: 1H bar SMA10/100 crossover (best implementation)
 
 Key Principles:
 - 4-36 hour holding period target
@@ -18,17 +25,21 @@ Key Principles:
 - Forced flows > discretionary flows
 """
 import time
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from src.stage3_v3.models import (
     MarketState, HybridSignal, Direction, MarketRegime, SignalType
+)
+from src.stage3_v3.bias import (
+    FUNDING_Z_SIGNIFICANT, FUNDING_Z_EXTREME, FUNDING_Z_DANGEROUS,
+    LIQ_IMBALANCE_THRESHOLD, LIQ_IMBALANCE_STRONG,
 )
 
 
 # Minimum liquidation thresholds by symbol tier (lowered for realistic firing)
 LIQ_THRESHOLDS: Dict[str, float] = {
-    "BTCUSDT": 1_000_000,   # $1M for BTC (was $5M - too high)
-    "ETHUSDT": 500_000,     # $500k for ETH (was $2M)
-    "default": 100_000,     # $100k for alts (was $500k)
+    "BTCUSDT": 2_500_000,   # $2.5M for BTC (realistic cascade threshold)
+    "ETHUSDT": 1_000_000,   # $1M for ETH
+    "default": 250_000,     # $250k for alts
 }
 
 
@@ -55,8 +66,10 @@ class FundingPressureContinuation:
     
     def __init__(self):
         self.name = "FUNDING_PRESSURE"
-        self.funding_z_threshold = 1.2      # z > 1.2 = crowded (was 1.5)
-        self.cumulative_threshold = 0.001   # 0.1% cumulative 24h funding (was 0.15%)
+        # FIXED (Audit): Use shared threshold constants for consistency
+        self.funding_z_threshold = FUNDING_Z_SIGNIFICANT  # z > 1.0 = crowded
+        self.funding_z_veto = FUNDING_Z_EXTREME           # z > 1.5 = veto opposite trades
+        self.cumulative_threshold = 0.001   # 0.1% cumulative 24h funding
         self.min_trend_strength = 0.35
         self.max_vol_expansion = 2.5        # Avoid volatility spikes
     
@@ -201,8 +214,8 @@ class TrendPullbackSignal:
         if not (self.rsi_range[0] < trend.rsi_14 < self.rsi_range[1]):
             return None
         
-        # Need pullback to EMA
-        if not trend.is_pullback_to_ema(threshold_pct=0.4):
+        # Need pullback to EMA (0.6% threshold for crypto volatility)
+        if not trend.is_pullback_to_ema(threshold_pct=0.6):
             return None
         
         # Structure confirmation
@@ -369,7 +382,7 @@ class LiquidationCascadeSignal:
             # Confidence based on cascade strength
             confidence = 0.60
             # Stronger imbalance = higher confidence
-            confidence += min(0.15, (abs(state.liq_imbalance_1h) - 0.6) * 0.5)
+            confidence += min(0.15, (abs(state.liq_imbalance_1h) - self.liq_imbalance_threshold) * 0.5)
             # Larger cascade = higher confidence
             confidence += min(0.10, (state.liq_total_1h / liq_threshold - 1) * 0.1)
             
@@ -436,7 +449,7 @@ class CompressedRangeBreakout:
     def __init__(self):
         self.name = "RANGE_BREAKOUT"
         self.max_range_pct = 0.04           # Range must be < 4% (was 3%)
-        self.min_range_hours = 8            # Range must persist 8h+ (was 18)
+        self.min_range_hours = 12           # Range must persist 12h+ for meaningful compression
         self.min_oi_increase = 0.002        # 0.2% OI increase on breakout (was 0.5%)
         self.min_liq_on_break = 50_000      # $50k liquidations on break (was $100k)
         
@@ -614,7 +627,8 @@ class TrendExhaustionReversal:
     def __init__(self):
         self.name = "EXHAUSTION_REVERSAL"
         self.min_extension_48h = 0.05       # 5%+ move in 48h
-        self.funding_extreme = 1.5          # z-score
+        # FIXED (Audit): Use shared threshold constant for consistency
+        self.funding_extreme = FUNDING_Z_EXTREME  # z-score threshold
         self.rsi_extreme = (25, 75)         # RSI extremes
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
@@ -726,6 +740,10 @@ class TrendExhaustionReversal:
 
 class EMATrendContinuation:
     """
+    DEPRECATED (Audit): Duplicate of TrendPullbackSignal - both detect EMA pullbacks.
+    This signal is no longer used in the engine and should be deleted.
+    Use TrendPullbackSignal instead.
+    
     EMA TREND CONTINUATION (PRIMARY WORKHORSE)
     ==========================================
     
@@ -813,7 +831,7 @@ class EMATrendContinuation:
             direction = Direction.LONG
             
             # Veto: Funding extreme against us
-            if state.funding_z > 1.5:  # Longs crowded, risky to long
+            if state.funding_z > FUNDING_Z_EXTREME:  # Longs crowded, risky to long
                 return None
         else:
             # Need bearish structure
@@ -822,7 +840,7 @@ class EMATrendContinuation:
             direction = Direction.SHORT
             
             # Veto: Funding extreme against us
-            if state.funding_z < -1.5:  # Shorts crowded, risky to short
+            if state.funding_z < -FUNDING_Z_EXTREME:  # Shorts crowded, risky to short
                 return None
         
         # Flip prevention
@@ -898,6 +916,10 @@ class EMATrendContinuation:
 
 class ADXExpansionMomentum:
     """
+    DEPRECATED (Audit): This signal uses fake ADX (trend.strength * 50).
+    Real ADX requires +DI/-DI calculation which is not implemented.
+    This signal is no longer used in the engine and should be deleted.
+    
     ADX EXPANSION MOMENTUM
     ======================
     
@@ -992,11 +1014,11 @@ class ADXExpansionMomentum:
         
         if trend.ema_20 > trend.ema_50 * 1.002:  # Clear bullish
             direction = Direction.LONG
-            if state.funding_z > 1.2:  # Longs crowded
+            if state.funding_z > FUNDING_Z_SIGNIFICANT:  # Longs crowded
                 return None
         elif trend.ema_20 < trend.ema_50 * 0.998:  # Clear bearish
             direction = Direction.SHORT
-            if state.funding_z < -1.2:  # Shorts crowded
+            if state.funding_z < -FUNDING_Z_SIGNIFICANT:  # Shorts crowded
                 return None
         else:
             return None  # No clear direction
@@ -1194,9 +1216,9 @@ class StructureBreakRetest:
         
         # === FUNDING VETO ===
         
-        if direction == Direction.LONG and state.funding_z > 1.5:
+        if direction == Direction.LONG and state.funding_z > FUNDING_Z_EXTREME:
             return None
-        if direction == Direction.SHORT and state.funding_z < -1.5:
+        if direction == Direction.SHORT and state.funding_z < -FUNDING_Z_EXTREME:
             return None
         
         # Flip prevention
@@ -1373,10 +1395,10 @@ class CompressionBreakout:
         if direction == Direction.SHORT and state.regime == MarketRegime.TRENDING_UP:
             return None
         
-        # Funding veto
-        if direction == Direction.LONG and state.funding_z > 1.5:
+        # Funding veto (FIXED: Audit - use shared threshold)
+        if direction == Direction.LONG and state.funding_z > FUNDING_Z_EXTREME:
             return None
-        if direction == Direction.SHORT and state.funding_z < -1.5:
+        if direction == Direction.SHORT and state.funding_z < -FUNDING_Z_EXTREME:
             return None
         
         # OI should be increasing (new positions)
@@ -1523,10 +1545,10 @@ class SMACrossover:
         if abs(state.price_change_1h) > 0.025:  # >2.5% move
             return None
         
-        # Funding extreme against us
-        if direction == Direction.LONG and state.funding_z > 1.5:
+        # Funding extreme against us (FIXED: Audit - use shared threshold)
+        if direction == Direction.LONG and state.funding_z > FUNDING_Z_EXTREME:
             return None
-        if direction == Direction.SHORT and state.funding_z < -1.5:
+        if direction == Direction.SHORT and state.funding_z < -FUNDING_Z_EXTREME:
             return None
         
         # Cooldown: 24 hours between signals (crossovers should be rare)

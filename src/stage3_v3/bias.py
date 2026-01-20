@@ -12,9 +12,29 @@ Components:
 - Trend: What's the 4h/24h direction?
 
 Output: LONG / SHORT / NEUTRAL with strength 0-1
+
+FIXED (Audit): Added shared threshold constants for consistency between
+bias calculator and individual signals.
 """
 from typing import Optional
 from src.stage3_v3.models import Bias, Direction
+
+
+# =============================================================================
+# SHARED THRESHOLD CONSTANTS (FIXED: Audit alignment)
+# =============================================================================
+# These should be used by both BiasCalculator and individual signals
+# to ensure consistent behavior across the system.
+
+FUNDING_Z_SIGNIFICANT = 1.0   # Z-score for meaningful funding pressure
+FUNDING_Z_EXTREME = 1.5       # Z-score for strong veto (signals use this)
+FUNDING_Z_DANGEROUS = 2.0     # Z-score for dangerous crowding
+
+OI_CHANGE_SIGNIFICANT = 0.02  # 2% OI change is meaningful
+OI_CHANGE_STRONG = 0.03       # 3% OI change is strong
+
+LIQ_IMBALANCE_THRESHOLD = 0.3  # 30% imbalance is notable
+LIQ_IMBALANCE_STRONG = 0.5     # 50% imbalance is strong
 
 
 class BiasCalculator:
