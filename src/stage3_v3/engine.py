@@ -409,7 +409,7 @@ class HybridAlphaEngine:
                     bias_direction=bias.direction.value,
                     bias_strength=f"{bias.strength:.2f}",
                 )
-            return None
+                return None
         
         # ==========================================
         # VETO CHECK

@@ -27,7 +27,13 @@ logger = structlog.get_logger(__name__)
 # API endpoints
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
 COINALYZE_BASE = "https://api.coinalyze.net/v1"
-COINALYZE_API_KEY = "d02ff8e4-16e7-44b1-bcb8-ef663a8de294"
+
+def _get_coinalyze_api_key() -> str:
+    """Get Coinalyze API key from settings or fallback"""
+    if settings.COINALYZE_API_KEY:
+        return settings.COINALYZE_API_KEY
+    # Fallback for backwards compatibility - should be removed after env var is set
+    return "d02ff8e4-16e7-44b1-bcb8-ef663a8de294"
 
 # Retry settings
 MAX_RETRIES = 3
@@ -449,7 +455,7 @@ class AlphaDataBootstrap:
             "convert_to_usd": "true",
         }
         headers = {
-            "api_key": COINALYZE_API_KEY,
+            "api_key": _get_coinalyze_api_key(),
         }
         
         for attempt in range(MAX_RETRIES):

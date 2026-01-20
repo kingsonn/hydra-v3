@@ -124,6 +124,12 @@ class DerivativesCollector:
         # Liquidation tracking with timestamps
         self._liquidations: deque[tuple[int, Liquidation]] = deque(maxlen=10000)
         
+        # Per-symbol liquidation tracking for incremental bucket updates
+        # Each entry: (timestamp_ms, long_usd, short_usd)
+        self._liq_by_symbol: Dict[str, deque[tuple[int, float, float]]] = {
+            s: deque(maxlen=5000) for s in self.symbols
+        }
+        
         # Message queue for decoupling WS receive from processing
         self._liq_msg_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5000)
         
@@ -636,90 +642,77 @@ class DerivativesCollector:
             logger.error("liquidation_parse_error", error=str(e), message=message[:200])
     
     def _add_to_buckets(self, liq: Liquidation) -> None:
-        """Add liquidation to rolling buckets"""
+        """Add liquidation to rolling buckets and per-symbol tracking"""
         symbol = liq.symbol
         if symbol not in self._liq_buckets:
             return
         
         notional = liq.notional
+        now_ms = int(time.time() * 1000)
         
+        # Track for incremental updates
+        if liq.side == Side.BUY:
+            self._liq_by_symbol[symbol].append((now_ms, notional, 0.0))
+        else:
+            self._liq_by_symbol[symbol].append((now_ms, 0.0, notional))
+        
+        # Add to all buckets
         for bucket in self._liq_buckets[symbol].values():
             if liq.side == Side.BUY:
-                # Long liquidation (buyer was liquidated)
                 bucket.long_usd += notional
                 bucket.long_count += 1
             else:
-                # Short liquidation (seller was liquidated)
                 bucket.short_usd += notional
                 bucket.short_count += 1
     
     async def _update_buckets_loop(self) -> None:
-        """Periodically update rolling buckets (prune old data)"""
+        """Periodically prune expired liquidations from buckets (incremental)"""
+        # Track last pruned timestamp per symbol per window to avoid double-subtraction
+        last_pruned: Dict[str, Dict[str, int]] = {
+            s: {"30s": 0, "2m": 0, "5m": 0, "1h": 0} for s in self.symbols
+        }
+        
         while self._running:
             await asyncio.sleep(1)  # Update every second
             
             try:
                 now_ms = int(time.time() * 1000)
                 
+                # Define window cutoffs
+                cutoffs = {
+                    "30s": now_ms - 30_000,
+                    "2m": now_ms - 120_000,
+                    "5m": now_ms - 300_000,
+                    "1h": now_ms - 3600_000,
+                }
+                
                 for symbol in self.symbols:
-                    # Reset buckets
-                    for window_name, bucket in self._liq_buckets[symbol].items():
-                        bucket.long_usd = 0.0
-                        bucket.short_usd = 0.0
-                        bucket.long_count = 0
-                        bucket.short_count = 0
+                    liq_deque = self._liq_by_symbol[symbol]
+                    buckets = self._liq_buckets[symbol]
                     
-                    # Recalculate from recent liquidations
-                    cutoff_30s = now_ms - 30_000
-                    cutoff_2m = now_ms - 120_000
-                    cutoff_5m = now_ms - 300_000
-                    cutoff_1h = now_ms - 3600_000
+                    # For each window, subtract entries that just expired
+                    for window_name, cutoff in cutoffs.items():
+                        bucket = buckets[window_name]
+                        prev_cutoff = last_pruned[symbol][window_name]
+                        
+                        # Find entries that expired since last prune (between prev_cutoff and cutoff)
+                        for ts, long_usd, short_usd in liq_deque:
+                            if ts >= cutoff:
+                                break  # Not expired yet for this window
+                            if ts >= prev_cutoff:
+                                # This entry just expired from this window
+                                bucket.long_usd = max(0.0, bucket.long_usd - long_usd)
+                                bucket.short_usd = max(0.0, bucket.short_usd - short_usd)
+                                if long_usd > 0:
+                                    bucket.long_count = max(0, bucket.long_count - 1)
+                                if short_usd > 0:
+                                    bucket.short_count = max(0, bucket.short_count - 1)
+                        
+                        last_pruned[symbol][window_name] = cutoff
                     
-                    for ts, liq in self._liquidations:
-                        if liq.symbol != symbol:
-                            continue
-                        
-                        notional = liq.notional
-                        
-                        # 30s bucket
-                        if liq.timestamp_ms >= cutoff_30s:
-                            bucket = self._liq_buckets[symbol]["30s"]
-                            if liq.side == Side.BUY:
-                                bucket.long_usd += notional
-                                bucket.long_count += 1
-                            else:
-                                bucket.short_usd += notional
-                                bucket.short_count += 1
-                        
-                        # 2m bucket
-                        if liq.timestamp_ms >= cutoff_2m:
-                            bucket = self._liq_buckets[symbol]["2m"]
-                            if liq.side == Side.BUY:
-                                bucket.long_usd += notional
-                                bucket.long_count += 1
-                            else:
-                                bucket.short_usd += notional
-                                bucket.short_count += 1
-                        
-                        # 5m bucket
-                        if liq.timestamp_ms >= cutoff_5m:
-                            bucket = self._liq_buckets[symbol]["5m"]
-                            if liq.side == Side.BUY:
-                                bucket.long_usd += notional
-                                bucket.long_count += 1
-                            else:
-                                bucket.short_usd += notional
-                                bucket.short_count += 1
-                        
-                        # 1h bucket
-                        if liq.timestamp_ms >= cutoff_1h:
-                            bucket = self._liq_buckets[symbol]["1h"]
-                            if liq.side == Side.BUY:
-                                bucket.long_usd += notional
-                                bucket.long_count += 1
-                            else:
-                                bucket.short_usd += notional
-                                bucket.short_count += 1
+                    # Remove entries that expired from largest window (1h)
+                    while liq_deque and liq_deque[0][0] < cutoffs["1h"]:
+                        liq_deque.popleft()
                     
                     # Store 5-min snapshot for long-term rolling memory
                     last_snapshot = self._last_5m_snapshot_time[symbol]

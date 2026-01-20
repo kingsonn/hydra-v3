@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     PROJECT_ROOT: Path = Path(__file__).parent.parent
     DATA_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent / "data")
     
+    # External API keys (loaded from environment)
+    COINALYZE_API_KEY: str = Field(default="")
+    
     # Binance Futures endpoints
     BINANCE_WS_BASE: str = "wss://fstream.binance.com/ws"
     BINANCE_REST_BASE: str = "https://fapi.binance.com"

@@ -327,9 +327,18 @@ class Stage2Orchestrator:
             try:
                 result = self.on_market_state(market_state)
                 if asyncio.iscoroutine(result):
-                    asyncio.create_task(result)
+                    task = asyncio.create_task(result)
+                    task.add_done_callback(self._handle_callback_error)
             except Exception as e:
                 logger.error("market_state_callback_error", error=str(e))
+    
+    def _handle_callback_error(self, task: asyncio.Task) -> None:
+        """Handle errors from async callbacks to prevent silent failures"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error("async_callback_error", error=str(exc)[:100])
     
     # ========== PERIODIC UPDATE LOOP ==========
     

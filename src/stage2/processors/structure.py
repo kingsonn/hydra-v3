@@ -74,8 +74,11 @@ class StructureProcessor:
         self.symbol = symbol
         
         # Rolling trade buffers: (price, qty, timestamp_ms)
-        self._trades_5m: deque[Tuple[float, float, int]] = deque()
-        self._trades_30m: deque[Tuple[float, float, int]] = deque()
+        # maxlen prevents unbounded memory growth during high-volume periods
+        # 50k trades ≈ 2MB memory, handles ~170 trades/sec for 5min
+        self._trades_5m: deque[Tuple[float, float, int]] = deque(maxlen=50_000)
+        # 200k trades handles ~110 trades/sec for 30min window
+        self._trades_30m: deque[Tuple[float, float, int]] = deque(maxlen=200_000)
         
         # Cached volume profiles for fast access
         self._profile_5m: Dict[float, float] = {}
