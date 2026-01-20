@@ -11,9 +11,9 @@ from urllib3.util.connection import create_connection
 
 load_dotenv()
 
-api_key = "weex_f31d212f2b6f493626e7a2496decb70d"
-secret_key = "b32c079bb1233940d41d1a2fefdac16569b722661c10f2416ad1b08ef7389f98"
-access_passphrase = "weex110999239"
+api_key = os.getenv("WEEX_API_KEY")
+secret_key = os.getenv("WEEX_SECRET_KEY")
+access_passphrase = os.getenv("WEEX_PASSPHRASE")
 
 # Optional: Set proxy if needed (format: http://ip:port or socks5://ip:port)
 PROXY = os.getenv("WEEX_PROXY", None)
