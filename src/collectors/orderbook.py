@@ -6,6 +6,7 @@ Used for absorption analysis, liquidity detection, sweep flags
 import asyncio
 import time
 import random
+import socket
 from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass
@@ -92,13 +93,14 @@ class OrderBookCollector:
         # Resilience components - MORE TOLERANT for 24/7 operation
         self._backoff = AdaptiveBackoff(base_delay_s=2.0, max_delay_s=120.0)
         self._ws_config = WebSocketConfig(
-            ping_interval=20.0,
-            ping_timeout=60.0,
-            close_timeout=15.0,
-            connect_timeout=60.0,
+            ping_interval=10.0,  # More frequent pings to keep NAT alive
+            ping_timeout=30.0,
+            close_timeout=10.0,
+            connect_timeout=45.0,
         )
         self._supervisor = get_supervisor()
         self._conn_name = "orderbook_ws"
+        self._force_reconnect = False  # Flag for graceful reconnect
         
         # Health metrics
         self._last_update_time: Dict[str, int] = {}
@@ -195,11 +197,29 @@ class OrderBookCollector:
     
     async def _connect_and_listen(self) -> None:
         """Connect and listen for order book updates"""
-        # Use timeout for connection
+        # Reset reconnect flag
+        self._force_reconnect = False
+        
+        # Create socket with TCP keepalive to prevent NAT timeout
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Set keepalive parameters (platform-specific, may not work on all OS)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except (AttributeError, OSError):
+            pass  # Not available on all platforms
+        
+        # Use timeout for connection with extra headers
         async with asyncio.timeout(self._ws_config.connect_timeout):
             ws = await websockets.connect(
                 self.ws_url,
                 **self._ws_config.to_kwargs(),
+                extra_headers={
+                    "User-Agent": "HYDRA-Trading-Bot/3.0",
+                    "Origin": "https://fapi.binance.com",
+                },
             )
         
         async with ws:
@@ -240,6 +260,12 @@ class OrderBookCollector:
                     # Check if connection is too old (periodic refresh)
                     if time.time() - self._connection_time > self._max_connection_age_s:
                         logger.info("orderbook_connection_refresh", age_hours=self._max_connection_age_s/3600)
+                        self._force_reconnect = True
+                        break
+                    
+                    # Check if health loop requested reconnect
+                    if self._force_reconnect:
+                        logger.info("orderbook_force_reconnect_requested")
                         break
                         
             except GeneratorExit:
@@ -269,18 +295,17 @@ class OrderBookCollector:
                 logger.error("orderbook_process_error", error=str(e)[:100])
     
     async def _connection_health_loop(self) -> None:
-        """Monitor connection health and force reconnect if needed"""
-        while self._running:
+        """Monitor connection health and signal reconnect if needed"""
+        while self._running and not self._force_reconnect:
             try:
                 await asyncio.sleep(30)  # Check every 30 seconds
                 
                 # Check for message silence (connection might be dead)
                 silence = time.time() - self._last_message_time if self._last_message_time else 0
-                if silence > 60:  # 60 seconds of silence
+                if silence > 90:  # 90 seconds of silence = likely dead
                     logger.warning("orderbook_connection_silent", silence_s=f"{silence:.1f}")
-                    # Force close to trigger reconnect
-                    if self._ws:
-                        await self._ws.close(1000, "health_check_timeout")
+                    # Signal reconnect instead of forcing close (avoids race condition)
+                    self._force_reconnect = True
                     break
                     
             except asyncio.CancelledError:

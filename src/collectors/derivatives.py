@@ -6,6 +6,7 @@ WebSocket stream for liquidations
 import asyncio
 import time
 import random
+import socket
 from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass
@@ -153,14 +154,15 @@ class DerivativesCollector:
         # Resilience components - MORE TOLERANT for 24/7 operation
         self._backoff = AdaptiveBackoff(base_delay_s=2.0, max_delay_s=120.0)
         self._ws_config = WebSocketConfig(
-            ping_interval=20.0,
-            ping_timeout=60.0,
-            close_timeout=15.0,
-            connect_timeout=60.0,
+            ping_interval=10.0,  # More frequent pings to keep NAT alive
+            ping_timeout=30.0,
+            close_timeout=10.0,
+            connect_timeout=45.0,
         )
         self._supervisor = get_supervisor()
         self._conn_name = "liquidations_ws"
         self._rest_conn_name = "rest_api"
+        self._force_reconnect = False  # Flag for graceful reconnect
         
         # Health
         self._request_count = 0
@@ -490,11 +492,28 @@ class DerivativesCollector:
     
     async def _connect_and_listen_liquidations(self) -> None:
         """Connect to liquidation WebSocket and listen"""
-        # Use timeout for connection
+        # Reset reconnect flag
+        self._force_reconnect = False
+        
+        # Create socket with TCP keepalive to prevent NAT timeout
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except (AttributeError, OSError):
+            pass  # Not available on all platforms
+        
+        # Use timeout for connection with extra headers
         async with asyncio.timeout(self._ws_config.connect_timeout):
             ws = await websockets.connect(
                 self.liq_ws_url,
                 **self._ws_config.to_kwargs(),
+                extra_headers={
+                    "User-Agent": "HYDRA-Trading-Bot/3.0",
+                    "Origin": "https://fstream.binance.com",
+                },
             )
         
         async with ws:
@@ -534,6 +553,12 @@ class DerivativesCollector:
                     # Check if connection is too old
                     if time.time() - self._liq_connection_time > self._max_ws_age_s:
                         logger.info("liquidations_connection_refresh", age_hours=self._max_ws_age_s/3600)
+                        self._force_reconnect = True
+                        break
+                    
+                    # Check if health loop requested reconnect
+                    if self._force_reconnect:
+                        logger.info("liquidations_force_reconnect_requested")
                         break
                         
             except GeneratorExit:
@@ -563,8 +588,8 @@ class DerivativesCollector:
                 logger.error("liquidation_process_error", error=str(e)[:100])
     
     async def _liq_health_loop(self) -> None:
-        """Monitor liquidation connection health"""
-        while self._running:
+        """Monitor liquidation connection health - signal reconnect if needed"""
+        while self._running and not self._force_reconnect:
             try:
                 await asyncio.sleep(60)  # Check every 60 seconds (liquidations are sparse)
                 
@@ -577,8 +602,8 @@ class DerivativesCollector:
                     # Only force reconnect if we're past connection refresh time anyway
                     if time.time() - self._liq_connection_time > self._max_ws_age_s / 2:
                         logger.warning("liquidations_long_silence", silence_s=f"{silence:.0f}")
-                        if self._liq_ws:
-                            await self._liq_ws.close(1000, "health_check_refresh")
+                        # Signal reconnect instead of forcing close (avoids race condition)
+                        self._force_reconnect = True
                         break
                         
             except asyncio.CancelledError:
