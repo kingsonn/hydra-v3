@@ -150,12 +150,13 @@ class DerivativesCollector:
         self._liq_ws: Optional[websockets.WebSocketClientProtocol] = None
         self._last_funding_time: Dict[str, int] = {}
         
-        # Resilience components
-        self._backoff = AdaptiveBackoff(base_delay_s=1.0, max_delay_s=60.0)
+        # Resilience components - MORE TOLERANT for 24/7 operation
+        self._backoff = AdaptiveBackoff(base_delay_s=2.0, max_delay_s=120.0)
         self._ws_config = WebSocketConfig(
-            ping_interval=30.0,
-            ping_timeout=30.0,
-            close_timeout=10.0,
+            ping_interval=20.0,
+            ping_timeout=60.0,
+            close_timeout=15.0,
+            connect_timeout=60.0,
         )
         self._supervisor = get_supervisor()
         self._conn_name = "liquidations_ws"
@@ -217,10 +218,10 @@ class DerivativesCollector:
                 except Exception:
                     pass
             
-            # Create new client with standard settings (httpx handles DNS internally)
+            # Create new client with LONGER timeouts for stability
             self._client = httpx.AsyncClient(
                 base_url=settings.BINANCE_REST_BASE,
-                timeout=httpx.Timeout(30.0, connect=10.0, pool=10.0),
+                timeout=httpx.Timeout(60.0, connect=30.0, pool=30.0),  # Longer timeouts
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
                 headers={"User-Agent": "HYDRA-Trading-Bot/1.0"},
             )

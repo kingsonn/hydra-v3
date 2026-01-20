@@ -23,10 +23,10 @@ class CircuitState(Enum):
 @dataclass
 class CircuitBreakerConfig:
     """Configuration for circuit breaker"""
-    failure_threshold: int = 5          # Failures before opening
-    recovery_timeout_s: float = 30.0    # Time before trying half-open
+    failure_threshold: int = 10         # Failures before opening (more tolerant)
+    recovery_timeout_s: float = 60.0    # Time before trying half-open (longer wait)
     success_threshold: int = 2          # Successes needed to close
-    half_open_max_calls: int = 3        # Max calls in half-open state
+    half_open_max_calls: int = 5        # Max calls in half-open state
 
 
 class CircuitBreaker:
@@ -421,15 +421,15 @@ class WebSocketConfig:
     """Optimized WebSocket configuration for long-running stability"""
     # Binance sends pings every 5 minutes, we need to respond
     # Setting ping_interval to None lets us handle it ourselves
-    ping_interval: Optional[float] = 30.0    # Our ping interval (None = disabled)
-    ping_timeout: Optional[float] = 30.0     # Increased timeout
-    close_timeout: float = 10.0              # Time to wait for close
+    ping_interval: Optional[float] = 20.0    # Our ping interval (keep connection alive)
+    ping_timeout: Optional[float] = 60.0     # Longer timeout for slow networks
+    close_timeout: float = 15.0              # Time to wait for close
     max_size: int = 10_000_000               # 10MB max message
     compression: Optional[str] = None        # Disable for speed
     
     # Additional resilience settings
-    connect_timeout: float = 30.0            # Connection timeout
-    read_timeout: float = 120.0              # Read timeout (2 min silence = dead)
+    connect_timeout: float = 60.0            # Connection timeout (longer for slow networks)
+    read_timeout: float = 180.0              # Read timeout (3 min silence = dead)
     
     def to_kwargs(self) -> Dict[str, Any]:
         """Convert to websockets.connect kwargs"""
@@ -451,8 +451,8 @@ def get_supervisor() -> ConnectionSupervisor:
     global _supervisor
     if _supervisor is None:
         _supervisor = ConnectionSupervisor(
-            max_silence_s=90.0,  # 90 seconds silence triggers reconnect
-            check_interval_s=15.0,
+            max_silence_s=180.0,  # 3 minutes silence triggers reconnect (more tolerant)
+            check_interval_s=30.0,  # Check less frequently to reduce noise
         )
     return _supervisor
 
@@ -461,22 +461,23 @@ async def init_resilience() -> ConnectionSupervisor:
     """Initialize resilience systems"""
     supervisor = get_supervisor()
     
-    # Register standard connections
+    # Register standard connections with MORE TOLERANT settings for 24/7 operation
+    # Network hiccups are normal - don't trip circuit on minor issues
     supervisor.register_connection("trades_ws", CircuitBreakerConfig(
-        failure_threshold=5,
-        recovery_timeout_s=30.0,
-    ))
-    supervisor.register_connection("orderbook_ws", CircuitBreakerConfig(
-        failure_threshold=5,
-        recovery_timeout_s=30.0,
-    ))
-    supervisor.register_connection("liquidations_ws", CircuitBreakerConfig(
-        failure_threshold=5,
+        failure_threshold=15,       # Very tolerant - trades are critical
         recovery_timeout_s=45.0,
     ))
-    supervisor.register_connection("rest_api", CircuitBreakerConfig(
-        failure_threshold=10,
+    supervisor.register_connection("orderbook_ws", CircuitBreakerConfig(
+        failure_threshold=20,       # Most tolerant - orderbook can be slow
         recovery_timeout_s=60.0,
+    ))
+    supervisor.register_connection("liquidations_ws", CircuitBreakerConfig(
+        failure_threshold=15,
+        recovery_timeout_s=60.0,
+    ))
+    supervisor.register_connection("rest_api", CircuitBreakerConfig(
+        failure_threshold=20,       # REST can have rate limits
+        recovery_timeout_s=90.0,
     ))
     
     return supervisor

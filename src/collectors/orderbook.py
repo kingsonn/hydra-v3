@@ -89,12 +89,13 @@ class OrderBookCollector:
         self._running = False
         self._consecutive_errors = 0
         
-        # Resilience components
-        self._backoff = AdaptiveBackoff(base_delay_s=1.0, max_delay_s=60.0)
+        # Resilience components - MORE TOLERANT for 24/7 operation
+        self._backoff = AdaptiveBackoff(base_delay_s=2.0, max_delay_s=120.0)
         self._ws_config = WebSocketConfig(
-            ping_interval=30.0,
-            ping_timeout=30.0,
-            close_timeout=10.0,
+            ping_interval=20.0,
+            ping_timeout=60.0,
+            close_timeout=15.0,
+            connect_timeout=60.0,
         )
         self._supervisor = get_supervisor()
         self._conn_name = "orderbook_ws"
