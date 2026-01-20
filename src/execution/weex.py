@@ -195,16 +195,26 @@ class WeexClient:
                 if response.status == 200:
                     try:
                         data = json.loads(text)
-                        if data.get("code") == "00000":
-                            positions = data.get("data", [])
+                        if isinstance(data, list):
                             logger.info(
                                 "weex_connectivity_check",
                                 status="success",
-                                positions_count=len(positions) if positions else 0,
+                                positions_count=len(data),
                             )
-                            return True, f"Connected to WEEX. Active positions: {len(positions) if positions else 0}"
+                            return True, f"Connected to WEEX. Active positions: {len(data)}"
+                        elif isinstance(data, dict):
+                            if data.get("code") == "00000":
+                                positions = data.get("data", [])
+                                logger.info(
+                                    "weex_connectivity_check",
+                                    status="success",
+                                    positions_count=len(positions) if positions else 0,
+                                )
+                                return True, f"Connected to WEEX. Active positions: {len(positions) if positions else 0}"
+                            else:
+                                return False, f"WEEX API error: {data.get('msg', 'Unknown')}"
                         else:
-                            return False, f"WEEX API error: {data.get('msg', 'Unknown')}"
+                            return True, "Connected to WEEX"
                     except json.JSONDecodeError:
                         return False, f"Invalid JSON response: {text[:100]}"
                 else:
