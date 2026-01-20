@@ -7,7 +7,13 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/hydra-v3
-ExecStart=/home/ubuntu/hydra-v3/venv/bin/python /home/ubuntu/hydra-v3/run_hydra.py
+
+# Trading modes:
+# Paper trading (default):     run_hydra.py
+# Live trading (dry-run):      run_hydra.py --live
+# REAL trading (actual orders): run_hydra.py --live --real
+ExecStart=/home/ubuntu/hydra-v3/venv/bin/python /home/ubuntu/hydra-v3/run_hydra.py --live --real
+
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=15

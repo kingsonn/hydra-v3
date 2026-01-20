@@ -4,7 +4,13 @@ Hydra Global Pipeline Entry Point
 Proper signal handling for systemd service
 
 Now runs V3 hybrid alpha system by default.
+
+Usage:
+  python run_hydra.py                    # Paper trading (simulation only)
+  python run_hydra.py --live             # Live trading with WEEX (dry-run mode)
+  python run_hydra.py --live --real      # REAL TRADING - actual orders placed!
 """
+import argparse
 import asyncio
 import os
 import signal
@@ -22,8 +28,70 @@ from src.dashboard.global_runner_v3 import run_global_pipeline_v3
 logger = structlog.get_logger(__name__)
 
 
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Hydra V3 Trading Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run_hydra.py                    # Paper trading (simulation only)
+  python run_hydra.py --live             # Live trading with WEEX (dry-run mode)
+  python run_hydra.py --live --real      # REAL TRADING - actual orders placed!
+        """
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Enable live trading mode (connects to WEEX API)"
+    )
+    parser.add_argument(
+        "--real",
+        action="store_true",
+        help="Execute REAL orders (requires --live). WITHOUT THIS FLAG, orders are simulated."
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8889,
+        help="Dashboard port (default: 8889)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main entry point with proper signal handling"""
+    args = parse_args()
+    
+    # Safety check for real trading
+    if args.real and not args.live:
+        print("ERROR: --real requires --live flag")
+        sys.exit(1)
+    
+    # Determine trading mode
+    live_trading = args.live
+    dry_run = not args.real  # dry_run=True unless --real is specified
+    
+    if live_trading:
+        if dry_run:
+            print("=" * 60)
+            print("LIVE TRADING MODE (DRY-RUN)")
+            print("Orders will be SIMULATED, not placed on exchange")
+            print("=" * 60)
+        else:
+            print("=" * 60)
+            print("⚠️  REAL TRADING MODE - ACTUAL ORDERS WILL BE PLACED!")
+            print("⚠️  This will use REAL money on WEEX exchange!")
+            print("=" * 60)
+            response = input("Type 'YES' to confirm: ")
+            if response != "YES":
+                print("Aborted.")
+                sys.exit(0)
+    else:
+        print("=" * 60)
+        print("PAPER TRADING MODE (simulation only)")
+        print("=" * 60)
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -52,7 +120,11 @@ def main():
     
     try:
         # Run the V3 pipeline
-        loop.run_until_complete(run_global_pipeline_v3())
+        loop.run_until_complete(run_global_pipeline_v3(
+            dashboard_port=args.port,
+            live_trading=live_trading,
+            dry_run=dry_run,
+        ))
     except KeyboardInterrupt:
         logger.info("keyboard_interrupt")
     finally:

@@ -53,7 +53,7 @@ from src.stage3_v3.signals import (
 )
 from src.stage6.position_sizer_v3 import PositionSizerV3, PositionResultV3
 from src.stage7.trade_manager_v3 import TradeManagerV3
-from src.dashboard.global_dashboard_v3 import broadcast_closed_trades
+from src.dashboard.global_dashboard_v3 import broadcast_closed_trades, set_close_position_callback
 
 logger = structlog.get_logger(__name__)
 
@@ -137,11 +137,15 @@ class GlobalPipelineRunnerV3:
         dashboard_port: int = 8889,  # Different port from old runner
         enable_dashboard: bool = True,
         initial_equity: float = 1000.0,
+        live_trading: bool = False,  # Enable real order execution via WEEX
+        dry_run: bool = True,  # If live_trading=True, dry_run=True simulates without real orders
     ):
         self.symbols = symbols or settings.SYMBOLS
         self.dashboard_port = dashboard_port
         self.enable_dashboard = enable_dashboard
         self.initial_equity = initial_equity
+        self.live_trading = live_trading
+        self.dry_run = dry_run
         
         # Warmup delay - 5 minutes to let data stabilize
         self._start_time = time.time()
@@ -187,14 +191,19 @@ class GlobalPipelineRunnerV3:
         # Stage 6 V3 position sizer
         self.position_sizer = PositionSizerV3(risk_pct=0.02)
         
-        # Stage 7 V3 trade manager
+        # Stage 7 V3 trade manager (with WEEX execution if live_trading enabled)
         self.trade_manager = TradeManagerV3(
             initial_equity=initial_equity,
             reset_on_start=True,
+            live_trading=live_trading,
+            dry_run=dry_run,
         )
         
         # Set up callback for closed trades broadcast
         self.trade_manager.set_trade_closed_callback(self._on_trade_closed)
+        
+        # Register manual close callback for dashboard Signal Status button
+        set_close_position_callback(self._manual_close_position)
         
         # Stage 1 orchestrator (will be initialized in start)
         self.stage1: Optional[Stage1Orchestrator] = None
@@ -488,7 +497,11 @@ class GlobalPipelineRunnerV3:
                 
                 # Place order if allowed
                 if position_result.allowed and position_result.position:
-                    order_id = await self.trade_manager.place_position(position_result.position)
+                    order_id = await self.trade_manager.place_position(
+                        position_result.position,
+                        market_state=market_state,
+                        signal=signal_fired,
+                    )
                     trade_opened = order_id is not None
                     
                     # If trade failed to open (e.g., margin issue), clear holding state
@@ -619,15 +632,16 @@ class GlobalPipelineRunnerV3:
     
     async def _update_loop(self):
         """Main update loop - process all symbols periodically"""
+        update_interval = settings.UPDATE_INTERVAL_S if settings.VM_MODE else 1.0
         while self._running:
             try:
                 for symbol in self.symbols:
                     await self._process_symbol(symbol)
+                    if settings.VM_MODE:
+                        await asyncio.sleep(0.05)
                 
-                # Periodic health logging for long-running stability
                 await self._log_health_if_needed()
-                
-                await asyncio.sleep(1.0)  # 1 second update interval
+                await asyncio.sleep(update_interval)
                 
             except asyncio.CancelledError:
                 break
@@ -688,7 +702,20 @@ class GlobalPipelineRunnerV3:
             "global_pipeline_v3_starting",
             symbols=self.symbols,
             dashboard_port=self.dashboard_port,
+            live_trading=self.live_trading,
+            dry_run=self.dry_run,
         )
+        
+        # Step 0: Check WEEX connectivity if live trading enabled
+        if self.live_trading:
+            connected, message = await self.trade_manager.check_weex_connectivity()
+            if connected:
+                logger.info("weex_connectivity_ok", message=message)
+            else:
+                logger.error("weex_connectivity_failed", message=message)
+                if not self.dry_run:
+                    # In real trading mode, abort if WEEX is not connected
+                    raise RuntimeError(f"WEEX connection required for live trading: {message}")
         
         # Step 1: Bootstrap historical data
         logger.info("bootstrapping_alpha_data", symbols=len(self.symbols))
@@ -766,9 +793,18 @@ class GlobalPipelineRunnerV3:
     async def _on_trade_closed(self, trade) -> None:
         """Callback when a trade is closed - broadcast to dashboard"""
         if self.enable_dashboard:
-            # Get all closed trades and broadcast
             closed_trades = self.trade_manager.get_closed_trades(limit=50)
             await broadcast_closed_trades(closed_trades)
+    
+    async def _manual_close_position(self, symbol: str, reason: str) -> Dict[str, Any]:
+        """Manual close position from dashboard Signal Status button"""
+        logger.info("manual_close_requested", symbol=symbol, reason=reason)
+        result = await self.trade_manager.manual_close_position(symbol, reason)
+        if result.get("success"):
+            self.position_sizer.release_hold(symbol)
+            closed_trades = self.trade_manager.get_closed_trades(limit=50)
+            await broadcast_closed_trades(closed_trades)
+        return result
     
     def get_health_metrics(self) -> Dict[str, Any]:
         """Get overall health metrics"""
@@ -786,6 +822,8 @@ async def run_global_pipeline_v3(
     symbols: Optional[List[str]] = None,
     duration_seconds: Optional[int] = None,
     dashboard_port: int = 8889,
+    live_trading: bool = False,
+    dry_run: bool = True,
 ) -> None:
     """
     Run the V3 global pipeline.
@@ -794,11 +832,15 @@ async def run_global_pipeline_v3(
         symbols: List of symbols (default: from settings)
         duration_seconds: Run for N seconds then stop (None = forever)
         dashboard_port: Port for dashboard UI
+        live_trading: Enable real order execution via WEEX API
+        dry_run: If live_trading=True, dry_run=True simulates without real orders
     """
     runner = GlobalPipelineRunnerV3(
         symbols=symbols,
         dashboard_port=dashboard_port,
         enable_dashboard=True,
+        live_trading=live_trading,
+        dry_run=dry_run,
     )
     
     # Handle shutdown

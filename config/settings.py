@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     DATA_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent / "data")
     
     # External API keys (loaded from environment)
-    COINALYZE_API_KEY: str = Field(default="")
+    COINALYZE_API_KEY: str = Field(default="", alias="COINALYSE_API_KEY")
+    
+    # WEEX API credentials
+    WEEX_API_KEY: str = Field(default="")
+    WEEX_SECRET_KEY: str = Field(default="")
+    WEEX_PASSPHRASE: str = Field(default="")
     
     # Binance Futures endpoints
     BINANCE_WS_BASE: str = "wss://fstream.binance.com/ws"
@@ -68,9 +73,22 @@ class Settings(BaseSettings):
     # Database
     DB_PATH: Path = Field(default_factory=lambda: Path(__file__).parent.parent / "data" / "hydra.db")
     
+    # VM/Cloud optimization (reduces CPU load on burstable instances like t3)
+    VM_MODE: bool = Field(default=False)
+    UPDATE_INTERVAL_S: float = Field(default=1.0)
+    BOOTSTRAP_TIMEOUT_S: int = Field(default=120)
+    WS_CONNECT_TIMEOUT_S: int = Field(default=60)
+    WS_PING_INTERVAL_S: int = Field(default=30)
+    WS_PING_TIMEOUT_S: int = Field(default=120)
+    REST_TIMEOUT_S: int = Field(default=60)
+    REST_RETRY_DELAY_S: float = Field(default=2.0)
+    MAX_CONCURRENT_REQUESTS: int = Field(default=5)
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"  # Ignore extra fields in .env
+        populate_by_name = True  # Allow both alias and field name
 
 
 settings = Settings()

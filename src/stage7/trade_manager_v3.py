@@ -8,6 +8,7 @@ Simplified trade management for Stage 3 V3 signals:
 - Trail stop to breakeven at +0.8%
 - Trail stop to 1R profit level after 1R reached
 - Single order placement (no batch)
+- WEEX API integration for real order execution
 
 Disabled features:
 - Stage 5 ML gating
@@ -16,12 +17,21 @@ Disabled features:
 """
 import asyncio
 import time
+import json
+from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 import structlog
 
 from src.stage6.position_sizer_v3 import PositionV3, PositionResultV3
+from src.execution.weex import WeexClient, OrderResult
+from src.execution.ai_log_generator import generate_ai_log, generate_close_ai_log
+
+# File paths for persistence
+AI_LOGS_PATH = Path("ai_logs.json")
+META_PATH = Path("meta_v6.json")
+ERRORS_PATH = Path("errors.json")
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +39,101 @@ logger = structlog.get_logger(__name__)
 FEE_PCT = 0.0008
 MARGIN_REQUIREMENT = 0.05  # 5% margin (20x leverage)
 BREAKEVEN_TRIGGER_PCT = 0.008  # +0.8% to trigger breakeven trail
+
+
+# ========== PERSISTENCE HELPERS ==========
+
+def _save_ai_log(ai_log_data: Dict[str, Any]) -> None:
+    """Append AI log to ai_logs.json"""
+    try:
+        logs = []
+        if AI_LOGS_PATH.exists():
+            with open(AI_LOGS_PATH, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    logs = json.loads(content)
+        logs.append(ai_log_data)
+        with open(AI_LOGS_PATH, 'w') as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        logger.warning("ai_log_save_failed", error=str(e)[:100])
+
+
+def _save_position_meta(symbol: str, data: Dict[str, Any]) -> None:
+    """Save position to meta_v6.json"""
+    try:
+        meta = {}
+        if META_PATH.exists():
+            with open(META_PATH, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    meta = json.loads(content)
+        meta[symbol] = data
+        with open(META_PATH, 'w') as f:
+            json.dump(meta, f, indent=2)
+        logger.info("position_meta_saved", symbol=symbol)
+    except Exception as e:
+        logger.warning("position_meta_save_failed", error=str(e)[:100])
+
+
+def _delete_position_meta(symbol: str) -> None:
+    """Delete position from meta_v6.json"""
+    try:
+        if not META_PATH.exists():
+            return
+        with open(META_PATH, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                return
+            meta = json.loads(content)
+        if symbol in meta:
+            del meta[symbol]
+            with open(META_PATH, 'w') as f:
+                json.dump(meta, f, indent=2)
+            logger.info("position_meta_deleted", symbol=symbol)
+    except Exception as e:
+        logger.warning("position_meta_delete_failed", error=str(e)[:100])
+
+
+def _save_api_error(action: str, symbol: str, error_code: str, error_message: str, raw_response: dict = None) -> None:
+    """Save API error to errors.json"""
+    try:
+        errors = []
+        if ERRORS_PATH.exists():
+            with open(ERRORS_PATH, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    errors = json.loads(content)
+        errors.append({
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "symbol": symbol,
+            "error_code": error_code,
+            "error_message": error_message,
+            "raw_response": raw_response,
+        })
+        # Keep only last 100 errors
+        if len(errors) > 100:
+            errors = errors[-100:]
+        with open(ERRORS_PATH, 'w') as f:
+            json.dump(errors, f, indent=2)
+    except Exception as e:
+        logger.warning("error_save_failed", error=str(e)[:100])
+
+
+def _load_positions_meta() -> Dict[str, Dict[str, Any]]:
+    """Load all positions from meta_v6.json"""
+    try:
+        if not META_PATH.exists():
+            return {}
+        with open(META_PATH, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except Exception as e:
+        logger.warning("position_meta_load_failed", error=str(e)[:100])
+        return {}
 
 
 @dataclass
@@ -142,14 +247,18 @@ class TradeManagerV3:
     - TP/SL exit only
     - Trail to breakeven at +0.8%
     - Trail to 1R after 1R profit reached
+    - WEEX API integration for real execution
     """
     
     def __init__(
         self,
         initial_equity: float = 1000.0,
         reset_on_start: bool = True,
+        live_trading: bool = False,
+        dry_run: bool = True,
     ):
         self.initial_equity = initial_equity
+        self.live_trading = live_trading
         
         # Account state
         self._account = AccountStateV3(
@@ -170,12 +279,31 @@ class TradeManagerV3:
         # Callbacks
         self._on_trade_closed: Optional[Callable] = None
         
+        # WEEX execution client
+        self._weex_client: Optional[WeexClient] = None
+        if live_trading:
+            self._weex_client = WeexClient(
+                equity=initial_equity,
+                dry_run=dry_run,
+            )
+            logger.info(
+                "weex_client_initialized",
+                dry_run=dry_run,
+                live_trading=live_trading,
+            )
+        
         if reset_on_start:
             self._reset()
+        
+        # Load existing positions from meta_v6.json on startup
+        self._load_existing_positions()
         
         logger.info(
             "trade_manager_v3_initialized",
             initial_equity=initial_equity,
+            live_trading=live_trading,
+            dry_run=dry_run,
+            loaded_positions=len(self._open_trades),
         )
     
     def _reset(self):
@@ -189,6 +317,51 @@ class TradeManagerV3:
         self._closed_trades.clear()
         self._order_counter = 0
     
+    def _load_existing_positions(self):
+        """Load positions from meta_v6.json on startup"""
+        positions = _load_positions_meta()
+        if not positions:
+            return
+        
+        for symbol, data in positions.items():
+            try:
+                trade = TradeRecordV3(
+                    order_id=data.get("order_id", f"RESTORED_{symbol}"),
+                    symbol=symbol,
+                    side=data.get("side", "LONG"),
+                    entry_price=data.get("entry_price", 0),
+                    size=data.get("size", 0),
+                    notional=data.get("notional", 0),
+                    margin=data.get("notional", 0) * MARGIN_REQUIREMENT,
+                    risk_amount=data.get("notional", 0) * data.get("stop_pct", 0.015),
+                    stop_price=data.get("stop_price", 0),
+                    stop_pct=data.get("stop_pct", 0.015),
+                    target_price=data.get("target_price", 0),
+                    target_pct=data.get("target_pct", 0.03),
+                    current_price=data.get("entry_price", 0),
+                    current_stop=data.get("current_stop", data.get("stop_price", 0)),
+                    signal_type=data.get("signal_type", ""),
+                    signal_name=data.get("signal_name", ""),
+                    created_at=data.get("created_at", datetime.now().isoformat()),
+                    breakeven_triggered=data.get("breakeven_triggered", False),
+                    trail_1r_triggered=data.get("trail_1r_triggered", False),
+                )
+                self._open_trades[symbol] = trade
+                
+                # Reserve margin
+                self._account.margin_used += trade.margin
+                self._account.margin_available -= trade.margin
+                
+                logger.info(
+                    "position_restored_from_meta",
+                    symbol=symbol,
+                    side=trade.side,
+                    entry=f"${trade.entry_price:.4f}",
+                    notional=f"${trade.notional:.2f}",
+                )
+            except Exception as e:
+                logger.warning("position_restore_failed", symbol=symbol, error=str(e)[:100])
+    
     def _generate_order_id(self) -> str:
         """Generate unique order ID"""
         self._order_counter += 1
@@ -196,9 +369,19 @@ class TradeManagerV3:
     
     # ========== ORDER PLACEMENT ==========
     
-    async def place_position(self, position: PositionV3) -> Optional[str]:
+    async def place_position(
+        self, 
+        position: PositionV3,
+        market_state: Any = None,
+        signal: Any = None,
+    ) -> Optional[str]:
         """
         Place a new position from V3 signal.
+        
+        Args:
+            position: Position sizing result
+            market_state: MarketState for AI log generation (optional)
+            signal: HybridSignal for AI log generation (optional)
         
         Returns:
             Order ID if successful, None if failed
@@ -221,17 +404,77 @@ class TradeManagerV3:
             )
             return None
         
-        # Create trade record
+        # Generate order ID
         order_id = self._generate_order_id()
+        
+        # Execute on WEEX if live trading enabled
+        weex_order_id = None
+        if self._weex_client and self.live_trading:
+            result = await self._weex_client.place_order(
+                symbol=symbol,
+                direction=position.side,  # "LONG" or "SHORT"
+                size_usd=position.notional,
+                entry_price=position.entry_price,
+                stop_price=position.stop_price,
+                target_price=position.target_price,
+                client_oid=order_id,
+            )
+            
+            if not result.success:
+                logger.error(
+                    "weex_order_failed",
+                    symbol=symbol,
+                    error=result.error_message,
+                )
+                _save_api_error("PLACE_ORDER", symbol, result.error_code or "", result.error_message or "", result.raw_response)
+                return None
+            
+            weex_order_id = result.order_id
+            logger.info(
+                "weex_order_placed",
+                symbol=symbol,
+                weex_order_id=weex_order_id,
+                client_oid=order_id,
+            )
+            
+            # Upload AI decision log for competition and save locally
+            if weex_order_id and market_state and signal:
+                try:
+                    ai_log = generate_ai_log(weex_order_id, market_state, signal)
+                    # Upload to WEEX
+                    await self._weex_client.upload_ai_log(
+                        order_id=ai_log.order_id,
+                        stage=ai_log.stage,
+                        model=ai_log.model,
+                        input_data=ai_log.input_data,
+                        output_data=ai_log.output_data,
+                        explanation=ai_log.explanation,
+                    )
+                    # Save locally to ai_logs.json
+                    _save_ai_log({
+                        "order_id": ai_log.order_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "OPEN",
+                        "symbol": symbol,
+                        "stage": ai_log.stage,
+                        "model": ai_log.model,
+                        "input": ai_log.input_data,
+                        "output": ai_log.output_data,
+                        "explanation": ai_log.explanation,
+                    })
+                except Exception as e:
+                    logger.warning("ai_log_upload_error", error=str(e)[:100])
+        
+        # Create trade record
         trade = TradeRecordV3(
-            order_id=order_id,
+            order_id=weex_order_id or order_id,
             symbol=symbol,
             side=position.side,
             entry_price=position.entry_price,
             size=position.size,
             notional=position.notional,
-            margin=position.margin,  # Margin used for this position
-            risk_amount=position.risk_amount,  # Actual $ risk for R calculation
+            margin=position.margin,
+            risk_amount=position.risk_amount,
             stop_price=position.stop_price,
             stop_pct=position.stop_pct,
             target_price=position.target_price,
@@ -250,9 +493,29 @@ class TradeManagerV3:
         # Store trade
         self._open_trades[symbol] = trade
         
+        # Save position metadata to meta_v6.json
+        _save_position_meta(symbol, {
+            "order_id": trade.order_id,
+            "symbol": symbol,
+            "side": position.side,
+            "entry_price": position.entry_price,
+            "size": position.size,
+            "notional": position.notional,
+            "stop_price": position.stop_price,
+            "stop_pct": position.stop_pct,
+            "target_price": position.target_price,
+            "target_pct": position.target_pct,
+            "current_stop": position.stop_price,
+            "signal_type": position.signal_type,
+            "signal_name": position.signal_name,
+            "created_at": trade.created_at,
+            "breakeven_triggered": False,
+            "trail_1r_triggered": False,
+        })
+        
         logger.info(
             "position_opened_v3",
-            order_id=order_id,
+            order_id=trade.order_id,
             symbol=symbol,
             side=position.side,
             entry=f"${position.entry_price:.4f}",
@@ -260,9 +523,10 @@ class TradeManagerV3:
             notional=f"${position.notional:.2f}",
             stop=f"${position.stop_price:.4f}",
             target=f"${position.target_price:.4f}",
+            live_trading=self.live_trading,
         )
         
-        return order_id
+        return trade.order_id
     
     # ========== PRICE UPDATES ==========
     
@@ -402,6 +666,73 @@ class TradeManagerV3:
     ) -> Dict[str, Any]:
         """Close a trade and update account"""
         symbol = trade.symbol
+        close_order_id = None
+        
+        # Close position on WEEX if live trading enabled (TRAIL_STOP or BIAS_REVERSAL)
+        # Note: TP and SL are handled by WEEX exchange directly via the order
+        if self._weex_client and self.live_trading and reason in ("TRAIL_STOP", "BIAS_REVERSAL"):
+            result = await self._weex_client.close_position(symbol)
+            if result.success:
+                # Extract successOrderId from response
+                # Response format: [{"positionId": ..., "successOrderId": 123, ...}]
+                raw = result.raw_response
+                if raw and raw.get("data"):
+                    data = raw["data"]
+                    if isinstance(data, list) and len(data) > 0:
+                        close_order_id = str(data[0].get("successOrderId", ""))
+                        if close_order_id == "0":
+                            close_order_id = None
+                
+                logger.info(
+                    "weex_position_closed",
+                    symbol=symbol,
+                    reason=reason,
+                    close_order_id=close_order_id,
+                )
+                
+                ai_reason = "Bias Reversal Detected" if reason == "BIAS_REVERSAL" else "Trail Stop by System"
+                if close_order_id:
+                    try:
+                        ai_log = generate_close_ai_log(
+                            order_id=close_order_id,
+                            symbol=symbol,
+                            reason=ai_reason,
+                            entry_price=trade.entry_price,
+                            close_price=close_price,
+                            side=trade.side,
+                            pnl=(close_price - trade.entry_price) * trade.size if trade.side == "LONG" else (trade.entry_price - close_price) * trade.size,
+                        )
+                        await self._weex_client.upload_ai_log(
+                            order_id=ai_log.order_id,
+                            stage=ai_log.stage,
+                            model=ai_log.model,
+                            input_data=ai_log.input_data,
+                            output_data=ai_log.output_data,
+                            explanation=ai_log.explanation,
+                        )
+                        # Save locally
+                        _save_ai_log({
+                            "order_id": close_order_id,
+                            "timestamp": datetime.now().isoformat(),
+                            "action": "CLOSE",
+                            "symbol": symbol,
+                            "reason": "Trail Stop by System",
+                            "stage": ai_log.stage,
+                            "model": ai_log.model,
+                            "input": ai_log.input_data,
+                            "output": ai_log.output_data,
+                            "explanation": ai_log.explanation,
+                        })
+                    except Exception as e:
+                        logger.warning("close_ai_log_error", error=str(e)[:100])
+            else:
+                logger.error(
+                    "weex_close_failed",
+                    symbol=symbol,
+                    error=result.error_message,
+                )
+                _save_api_error("CLOSE_POSITION", symbol, result.error_code or "", result.error_message or "", result.raw_response)
+                # Continue with local close even if WEEX fails
         
         # Calculate final PnL
         if trade.side == "LONG":
@@ -442,6 +773,9 @@ class TradeManagerV3:
         # Move to closed trades
         self._closed_trades.append(trade)
         del self._open_trades[symbol]
+        
+        # Delete from meta_v6.json
+        _delete_position_meta(symbol)
         
         logger.info(
             "trade_closed_v3",
@@ -497,14 +831,48 @@ class TradeManagerV3:
         """Set callback for trade closure"""
         self._on_trade_closed = callback
     
+    async def manual_close_position(self, symbol: str, reason: str = "BIAS_REVERSAL") -> Dict[str, Any]:
+        """Manually close a position (called from dashboard Signal Status button)"""
+        trade = self._open_trades.get(symbol)
+        if not trade:
+            return {"success": False, "error": f"No open trade for {symbol}"}
+        
+        result = await self._close_trade(trade, reason, trade.current_price)
+        return {"success": True, "data": result}
+    
     def get_health_metrics(self) -> Dict[str, Any]:
         """Get health metrics"""
-        return {
+        metrics = {
             "open_trades": len(self._open_trades),
             "closed_trades": len(self._closed_trades),
             "account": self._account.to_dict(),
             "open_symbols": list(self._open_trades.keys()),
+            "live_trading": self.live_trading,
         }
+        
+        # Add WEEX stats if available
+        if self._weex_client:
+            metrics["weex"] = self._weex_client.get_stats()
+        
+        return metrics
+    
+    async def check_weex_connectivity(self) -> Tuple[bool, str]:
+        """
+        Check WEEX API connectivity on startup.
+        
+        Returns:
+            Tuple of (success, message)
+        """
+        if not self._weex_client:
+            return True, "WEEX client not enabled (paper trading mode)"
+        
+        return await self._weex_client.check_connectivity()
+    
+    async def shutdown(self):
+        """Cleanup resources"""
+        if self._weex_client:
+            await self._weex_client.close()
+            logger.info("weex_client_closed")
     
     # ========== MANUAL OPERATIONS ==========
     

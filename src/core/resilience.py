@@ -419,17 +419,24 @@ class ResourceManager:
 @dataclass
 class WebSocketConfig:
     """Optimized WebSocket configuration for long-running stability"""
-    # Binance sends pings every 5 minutes, we need to respond
-    # Setting ping_interval to None lets us handle it ourselves
-    ping_interval: Optional[float] = 20.0    # Our ping interval (keep connection alive)
-    ping_timeout: Optional[float] = 60.0     # Longer timeout for slow networks
-    close_timeout: float = 15.0              # Time to wait for close
-    max_size: int = 10_000_000               # 10MB max message
-    compression: Optional[str] = None        # Disable for speed
+    ping_interval: Optional[float] = 30.0
+    ping_timeout: Optional[float] = 120.0
+    close_timeout: float = 15.0
+    max_size: int = 10_000_000
+    compression: Optional[str] = None
+    connect_timeout: float = 60.0
+    read_timeout: float = 180.0
     
-    # Additional resilience settings
-    connect_timeout: float = 60.0            # Connection timeout (longer for slow networks)
-    read_timeout: float = 180.0              # Read timeout (3 min silence = dead)
+    @classmethod
+    def for_vm(cls) -> "WebSocketConfig":
+        """VM-optimized config with longer timeouts"""
+        return cls(
+            ping_interval=45.0,
+            ping_timeout=180.0,
+            close_timeout=30.0,
+            connect_timeout=90.0,
+            read_timeout=300.0,
+        )
     
     def to_kwargs(self) -> Dict[str, Any]:
         """Convert to websockets.connect kwargs"""
@@ -457,27 +464,32 @@ def get_supervisor() -> ConnectionSupervisor:
     return _supervisor
 
 
-async def init_resilience() -> ConnectionSupervisor:
+async def init_resilience(vm_mode: bool = False) -> ConnectionSupervisor:
     """Initialize resilience systems"""
     supervisor = get_supervisor()
     
-    # Register standard connections with MORE TOLERANT settings for 24/7 operation
-    # Network hiccups are normal - don't trip circuit on minor issues
-    supervisor.register_connection("trades_ws", CircuitBreakerConfig(
-        failure_threshold=15,       # Very tolerant - trades are critical
-        recovery_timeout_s=45.0,
-    ))
+    if vm_mode:
+        base_config = CircuitBreakerConfig(
+            failure_threshold=30,
+            recovery_timeout_s=120.0,
+            success_threshold=3,
+            half_open_max_calls=3,
+        )
+    else:
+        base_config = CircuitBreakerConfig(
+            failure_threshold=15,
+            recovery_timeout_s=45.0,
+        )
+    
+    supervisor.register_connection("trades_ws", base_config)
     supervisor.register_connection("orderbook_ws", CircuitBreakerConfig(
-        failure_threshold=20,       # Most tolerant - orderbook can be slow
-        recovery_timeout_s=60.0,
+        failure_threshold=base_config.failure_threshold + 5,
+        recovery_timeout_s=base_config.recovery_timeout_s + 15,
     ))
-    supervisor.register_connection("liquidations_ws", CircuitBreakerConfig(
-        failure_threshold=15,
-        recovery_timeout_s=60.0,
-    ))
+    supervisor.register_connection("liquidations_ws", base_config)
     supervisor.register_connection("rest_api", CircuitBreakerConfig(
-        failure_threshold=20,       # REST can have rate limits
-        recovery_timeout_s=90.0,
+        failure_threshold=base_config.failure_threshold + 10,
+        recovery_timeout_s=base_config.recovery_timeout_s + 30,
     ))
     
     return supervisor

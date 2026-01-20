@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import structlog
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from config import settings
 
@@ -46,6 +46,13 @@ MAX_POSITION_HISTORY = 50
 # Rejection history
 rejection_history: List[dict] = []
 MAX_REJECTION_HISTORY = 20
+
+# Close position callback (set by runner)
+_close_position_callback: Optional[Any] = None
+
+def set_close_position_callback(callback):
+    global _close_position_callback
+    _close_position_callback = callback
 
 
 async def broadcast_pipeline_state(symbol: str, state: dict) -> None:
@@ -220,6 +227,22 @@ async def websocket_endpoint(websocket: WebSocket):
 async def get_dashboard():
     """Serve the V3 dashboard HTML"""
     return DASHBOARD_HTML_V3
+
+
+@app.post("/api/close/{symbol}")
+async def close_position_api(symbol: str):
+    """API endpoint to manually close a position (Signal Status button)"""
+    global _close_position_callback
+    
+    if _close_position_callback is None:
+        return JSONResponse({"success": False, "error": "No callback registered"}, status_code=500)
+    
+    try:
+        result = await _close_position_callback(symbol, "BIAS_REVERSAL")
+        return JSONResponse({"success": result.get("success", False), "data": result})
+    except Exception as e:
+        logger.error("close_position_api_error", symbol=symbol, error=str(e)[:100])
+        return JSONResponse({"success": False, "error": str(e)[:100]}, status_code=500)
 
 
 DASHBOARD_HTML_V3 = """
@@ -456,6 +479,75 @@ DASHBOARD_HTML_V3 = """
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #1a1a2a; }
         ::-webkit-scrollbar-thumb { background: #4a4a6a; border-radius: 3px; }
+        
+        .signal-status-btn {
+            background: linear-gradient(135deg, #7c3aed, #5b21b6);
+            color: #fff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 8px;
+            width: 100%;
+            transition: all 0.2s ease;
+        }
+        .signal-status-btn:hover { background: linear-gradient(135deg, #8b5cf6, #6d28d9); transform: scale(1.02); }
+        .signal-status-btn:active { transform: scale(0.98); }
+        .signal-status-btn:disabled { background: #444; cursor: not-allowed; opacity: 0.6; }
+        
+        @media (max-width: 768px) {
+            body { padding: 5px; }
+            .header { padding: 8px; margin-bottom: 10px; }
+            .header h1 { font-size: 1.2rem; }
+            .header .subtitle { font-size: 0.65rem; }
+            
+            .main-container {
+                flex-direction: column;
+                max-height: none;
+            }
+            
+            .pairs-grid {
+                grid-template-columns: 1fr;
+                max-height: none;
+                order: 2;
+            }
+            
+            .sidebar {
+                width: 100%;
+                max-height: none;
+                order: 1;
+                margin-bottom: 10px;
+            }
+            
+            .account-section {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 4px;
+            }
+            .account-section > div:first-child { grid-column: 1 / -1; }
+            .account-row { margin-bottom: 2px; font-size: 0.7rem; }
+            
+            .pair-card { padding: 10px; }
+            .symbol { font-size: 1rem; }
+            .price { font-size: 0.9rem; }
+            .badge { font-size: 0.55rem; padding: 2px 6px; }
+            
+            .alpha-grid { grid-template-columns: repeat(3, 1fr); gap: 3px; }
+            .alpha-item { padding: 3px; }
+            .alpha-label { font-size: 0.5rem; }
+            .alpha-value { font-size: 0.65rem; }
+            
+            .trade-section { padding: 10px; }
+            .trade-section h2 { font-size: 0.8rem; }
+        }
+        
+        @media (max-width: 480px) {
+            .alpha-grid { grid-template-columns: repeat(2, 1fr); }
+            .stages-row { gap: 2px; }
+            .stage-dot { width: 18px; height: 18px; font-size: 0.5rem; }
+        }
     </style>
 </head>
 <body>
@@ -612,6 +704,7 @@ DASHBOARD_HTML_V3 = """
                         <div style="font-size: 0.6rem; color: #666; margin-top: 3px;">
                             Size: ${formatNumber(d.open_trade_size || 0, 6)} | Notional: $${formatNumber(d.open_trade_notional || 0)} | Margin: $${formatNumber(d.open_trade_margin || 0)}
                         </div>
+                        <button class="signal-status-btn" onclick="closePosition('${symbol}')" id="btn-${symbol}">Signal Status</button>
                     </div>
                 `;
             }
@@ -866,6 +959,25 @@ DASHBOARD_HTML_V3 = """
             }
             if (d.account_margin_available !== undefined && mg) {
                 mg.textContent = '$' + d.account_margin_available.toFixed(2);
+            }
+        }
+        
+        async function closePosition(symbol) {
+            const btn = document.getElementById('btn-' + symbol);
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Closing...';
+            }
+            try {
+                const response = await fetch('/api/close/' + symbol, { method: 'POST' });
+                const result = await response.json();
+                if (result.success) {
+                    if (btn) { btn.textContent = 'Closed'; btn.style.background = '#00ff88'; }
+                } else {
+                    if (btn) { btn.textContent = 'Failed'; btn.style.background = '#ff4444'; btn.disabled = false; }
+                }
+            } catch (e) {
+                if (btn) { btn.textContent = 'Error'; btn.style.background = '#ff4444'; btn.disabled = false; }
             }
         }
         
