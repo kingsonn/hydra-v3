@@ -75,7 +75,7 @@ async def check_binance_ws():
 
 async def check_weex():
     import aiohttp
-    url = "https://api.weex.com/api/v1/public/time"
+    url = "https://api-contract.weex.com/capi/v2/market/contracts"
     try:
         start = time.time()
         async with aiohttp.ClientSession() as session:
