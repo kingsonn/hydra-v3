@@ -6,7 +6,7 @@ Core data structures for the hybrid alpha system.
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import time
 
 
@@ -156,6 +156,9 @@ class MarketState:
     
     # Volume
     volume_ratio: float = 1.0  # Current vs average
+    
+    # Bar history (from bootstrap - 1H bar closes)
+    bar_closes_1h: List[float] = field(default_factory=list)
     
     def is_tradeable(self) -> bool:
         """Basic check if market is in tradeable state"""

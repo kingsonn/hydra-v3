@@ -920,7 +920,7 @@ class ADXExpansionMomentum:
         self.min_di_separation = 8  # +DI and -DI must be 8+ apart
         
         self._last_signal: Dict[str, dict] = {}
-        self._adx_history: Dict[str, list] = {}  # Track ADX values
+        self._adx_state: Dict[str, dict] = {}  # Track ADX values per bar
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
         """
@@ -938,12 +938,19 @@ class ADXExpansionMomentum:
         # Proxy: trend.strength * 50 approximates ADX
         adx_proxy = trend.strength * 50
         
-        # Track ADX history for expansion detection
-        if symbol not in self._adx_history:
-            self._adx_history[symbol] = []
-        self._adx_history[symbol].append(adx_proxy)
-        if len(self._adx_history[symbol]) > 10:
-            self._adx_history[symbol] = self._adx_history[symbol][-10:]
+        # Initialize state for symbol
+        if symbol not in self._adx_state:
+            self._adx_state[symbol] = {"history": [], "last_bar_count": 0}
+        
+        adx_st = self._adx_state[symbol]
+        
+        # Only update history when bar count changes (new 1H bar from bootstrap)
+        bar_count = len(state.bar_closes_1h)
+        if bar_count > adx_st["last_bar_count"] and bar_count > 0:
+            adx_st["history"].append(adx_proxy)
+            adx_st["last_bar_count"] = bar_count
+            if len(adx_st["history"]) > 10:
+                adx_st["history"] = adx_st["history"][-10:]
         
         # === HARD VETOES ===
         
@@ -970,8 +977,8 @@ class ADXExpansionMomentum:
             return None
         
         # ADX must be rising (was lower recently)
-        if len(self._adx_history[symbol]) >= 5:
-            recent_min = min(self._adx_history[symbol][-5:-1])
+        if len(adx_st["history"]) >= 5:
+            recent_min = min(adx_st["history"][-5:-1])
             if recent_min >= 20:
                 return None  # Wasn't low enough recently
         else:
@@ -1006,8 +1013,8 @@ class ADXExpansionMomentum:
         confidence = 0.55
         
         # Fresh ADX cross (just crossed 25) = boost
-        if len(self._adx_history[symbol]) >= 2:
-            prev_adx = self._adx_history[symbol][-2]
+        if len(adx_st["history"]) >= 2:
+            prev_adx = adx_st["history"][-2]
             if prev_adx < 25 and adx_proxy >= 25:
                 confidence += 0.10  # Fresh cross
         
@@ -1078,7 +1085,7 @@ class StructureBreakRetest:
         Entry requires:
         1. Price broke 4H high/low
         2. Price retested the level
-        3. Price holding above/below (2+ candles)
+        3. Price holding above/below (2+ bars)
         """
         symbol = state.symbol
         price = state.current_price
@@ -1109,7 +1116,8 @@ class StructureBreakRetest:
                 "direction": None,
                 "break_time": 0,
                 "retested": False,
-                "hold_count": 0
+                "hold_count": 0,
+                "last_bar_count": 0  # Track bar changes for hold_count
             }
         
         bs = self._break_state[symbol]
@@ -1163,19 +1171,24 @@ class StructureBreakRetest:
                     bs["hold_count"] = 0
             return None  # Wait for hold confirmation
         
-        # Check hold (price back in direction)
-        if direction == Direction.LONG:
-            if price > level * (1 + self.retest_threshold / 2):
-                bs["hold_count"] += 1
-            else:
-                bs["hold_count"] = 0
-        else:
-            if price < level * (1 - self.retest_threshold / 2):
-                bs["hold_count"] += 1
-            else:
-                bs["hold_count"] = 0
+        # Check hold (price back in direction) - only increment on new bars
+        bar_count = len(state.bar_closes_1h)
+        is_new_bar = bar_count > bs["last_bar_count"] and bar_count > 0
         
-        # Need 2+ holds
+        if is_new_bar:
+            bs["last_bar_count"] = bar_count
+            if direction == Direction.LONG:
+                if price > level * (1 + self.retest_threshold / 2):
+                    bs["hold_count"] += 1
+                else:
+                    bs["hold_count"] = 0
+            else:
+                if price < level * (1 - self.retest_threshold / 2):
+                    bs["hold_count"] += 1
+                else:
+                    bs["hold_count"] = 0
+        
+        # Need 2+ bars holding
         if bs["hold_count"] < 2:
             return None
         
@@ -1439,10 +1452,10 @@ class SMACrossover:
     Classic momentum signal. When fast MA crosses slow MA, it confirms
     trend change. Works because millions watch these levels.
     
-    This is a HIGH-FREQUENCY signal gated by our safety filters.
+    Uses 1H bar closes from bootstrap (up to 250 bars available).
     
     Timeframe: 1H bars
-    Frequency: 1-2/day across symbols
+    Frequency: ~1-2/week per symbol (real crossovers are rare)
     Hold: 12-24 hours
     """
     
@@ -1451,71 +1464,46 @@ class SMACrossover:
         self.sma_fast_period = 10
         self.sma_slow_period = 100
         
-        # Track SMA values (need history for crossover detection)
-        self._sma_state: Dict[str, dict] = {}
+        # Track last signal and previous SMA values per symbol
         self._last_signal: Dict[str, dict] = {}
-    
-    def _update_sma(self, symbol: str, price: float) -> tuple:
-        """Update SMA values and return (sma10, sma100, prev_sma10, prev_sma100)"""
-        if symbol not in self._sma_state:
-            self._sma_state[symbol] = {
-                "prices": [],
-                "sma10": 0,
-                "sma100": 0,
-                "prev_sma10": 0,
-                "prev_sma100": 0,
-            }
-        
-        state = self._sma_state[symbol]
-        state["prices"].append(price)
-        
-        # Keep only last 100 prices
-        if len(state["prices"]) > 100:
-            state["prices"] = state["prices"][-100:]
-        
-        prices = state["prices"]
-        
-        # Store previous values
-        state["prev_sma10"] = state["sma10"]
-        state["prev_sma100"] = state["sma100"]
-        
-        # Calculate SMAs
-        if len(prices) >= 10:
-            state["sma10"] = sum(prices[-10:]) / 10
-        if len(prices) >= 100:
-            state["sma100"] = sum(prices[-100:]) / 100
-        elif len(prices) >= 50:
-            # Use available data as proxy until we have 100
-            state["sma100"] = sum(prices) / len(prices)
-        
-        return state["sma10"], state["sma100"], state["prev_sma10"], state["prev_sma100"]
+        self._prev_sma: Dict[str, dict] = {}  # Store previous bar's SMAs for crossover detection
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
         """
         Entry on SMA10/SMA100 crossover with safety gates.
+        Uses bar_closes_1h from MarketState (populated from bootstrap).
         """
         symbol = state.symbol
         price = state.current_price
         
-        # Update SMAs
-        sma10, sma100, prev_sma10, prev_sma100 = self._update_sma(symbol, price)
+        # Get 1H bar closes from bootstrap (via MarketState)
+        closes = state.bar_closes_1h
         
-        # Need both SMAs valid
-        if sma10 == 0 or sma100 == 0 or prev_sma10 == 0 or prev_sma100 == 0:
+        # Need at least 101 bars (100 for SMA100 + 1 for previous bar comparison)
+        if len(closes) < 101:
             return None
         
-        # === DETECT CROSSOVER ===
+        # Calculate current SMAs from bootstrap data
+        sma10 = sum(closes[-10:]) / 10
+        sma100 = sum(closes[-100:]) / 100
         
-        # Golden cross: SMA10 crosses ABOVE SMA100
+        # Calculate previous bar's SMAs (shift window back by 1)
+        prev_sma10 = sum(closes[-11:-1]) / 10
+        prev_sma100 = sum(closes[-101:-1]) / 100
+        
+        # Detect crossover
         golden_cross = prev_sma10 <= prev_sma100 and sma10 > sma100
-        
-        # Death cross: SMA10 crosses BELOW SMA100
         death_cross = prev_sma10 >= prev_sma100 and sma10 < sma100
         
         if not (golden_cross or death_cross):
             return None  # No crossover
         
         direction = Direction.LONG if golden_cross else Direction.SHORT
+        
+        # Prevent firing multiple times for same bar count (same crossover)
+        last = self._last_signal.get(symbol, {})
+        if last.get("bar_count") == len(closes):
+            return None  # Already fired for this bar
         
         # === HARD VETOES ===
         
@@ -1541,22 +1529,21 @@ class SMACrossover:
         if direction == Direction.SHORT and state.funding_z < -1.5:
             return None
         
-        # Cooldown: 3 hours between signals
-        last = self._last_signal.get(symbol, {})
+        # Cooldown: 24 hours between signals (crossovers should be rare)
         if last.get("time", 0) > 0:
             hours_since = (state.timestamp_ms - last["time"]) / (1000 * 3600)
-            if hours_since < 3:
+            if hours_since < 24:
                 return None
         
-        # Flip prevention: 6 hours if direction changed
+        # Flip prevention: 48 hours if direction changed
         if last.get("direction") and last["direction"] != direction:
             hours_since = (state.timestamp_ms - last.get("time", 0)) / (1000 * 3600)
-            if hours_since < 6:
+            if hours_since < 48:
                 return None
         
         # === SOFT GATES & CONFIDENCE ===
         
-        confidence = 0.52  # Base confidence for crossover
+        confidence = 0.55  # Base confidence for crossover
         
         # Trend alignment boost
         if direction == Direction.LONG and state.regime == MarketRegime.TRENDING_UP:
@@ -1574,13 +1561,14 @@ class SMACrossover:
         if state.oi_delta_4h > 0.003:
             confidence += 0.05
         elif state.oi_delta_4h < -0.003:
-            confidence -= 0.05  # Reduce confidence if OI contracting
+            confidence -= 0.05
         
         # Structure confirms
-        if direction == Direction.LONG and (state.trend.higher_high or state.trend.higher_low):
-            confidence += 0.05
-        elif direction == Direction.SHORT and (state.trend.lower_high or state.trend.lower_low):
-            confidence += 0.05
+        if state.trend:
+            if direction == Direction.LONG and (state.trend.higher_high or state.trend.higher_low):
+                confidence += 0.05
+            elif direction == Direction.SHORT and (state.trend.lower_high or state.trend.lower_low):
+                confidence += 0.05
         
         # Vol expansion in good zone
         if 1.2 < state.vol_expansion_ratio < 2.0:
@@ -1592,9 +1580,9 @@ class SMACrossover:
         
         # === STOP & TARGET ===
         
-        # Stop: 1.2% base, adjusted by ATR
-        atr_pct = state.atr_14 / price if price > 0 else 0.012
-        stop_pct = max(0.010, min(0.015, atr_pct * 1.0))
+        # Stop: 1.5% base for crossover trades (wider stops)
+        atr_pct = state.atr_14 / price if price > 0 else 0.015
+        stop_pct = max(0.012, min(0.020, atr_pct * 1.2))
         
         # Target: 2R base
         target_pct = stop_pct * 2.0
@@ -1603,13 +1591,14 @@ class SMACrossover:
         if confidence > 0.65:
             target_pct = stop_pct * 2.5
         
-        # Record signal
+        # Record signal with bar count to prevent re-firing
         self._last_signal[symbol] = {
             "time": state.timestamp_ms,
+            "bar_count": len(closes),
             "direction": direction
         }
         
-        cross_type = "Golden" if golden_cross else "Death"
+        cross_type = "Golden" if direction == Direction.LONG else "Death"
         return HybridSignal(
             direction=direction,
             signal_type=SignalType.SMA_CROSSOVER,
@@ -1617,7 +1606,7 @@ class SMACrossover:
             entry_price=price,
             stop_pct=stop_pct,
             target_pct=target_pct,
-            reason=f"SMA {cross_type} Cross: SMA10={sma10:.2f}, SMA100={sma100:.2f}, funding_z={state.funding_z:.2f}",
+            reason=f"SMA {cross_type} Cross (1H): SMA10={sma10:.2f}, SMA100={sma100:.2f}, bars={len(closes)}",
             bias_strength=state.bias.strength if state.bias else 0,
             regime=state.regime,
         )

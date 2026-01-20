@@ -596,6 +596,12 @@ class AlphaDataBootstrap:
             return 0.0, 0.0
         return self.liq_data[symbol].get_totals(window_minutes)
     
+    def get_bar_closes_1h(self, symbol: str) -> List[float]:
+        """Get list of 1H bar close prices (up to 250 bars)"""
+        if symbol not in self.price_data:
+            return []
+        return self.price_data[symbol].get_closes()
+    
     def get_liq_imbalance(self, symbol: str, window_minutes: int) -> float:
         """Get liquidation imbalance for window"""
         if symbol not in self.liq_data:

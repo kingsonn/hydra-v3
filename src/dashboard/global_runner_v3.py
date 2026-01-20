@@ -413,6 +413,9 @@ class GlobalPipelineRunnerV3:
             if market_state is None:
                 return
             
+            # Add bar history from bootstrap (for signals that need SMA etc.)
+            market_state.bar_closes_1h = self.bootstrap.get_bar_closes_1h(symbol)
+            
             # Calculate bias
             alpha_state = self.alpha_processor.get_state(symbol)
             if alpha_state is None:
