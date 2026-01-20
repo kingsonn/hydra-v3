@@ -97,6 +97,7 @@ STEP_SIZES = {
     "XRPUSDT": 0.1,
     "DOGEUSDT": 1.0,
     "ADAUSDT": 1.0,
+    "LTCUSDT": 0.1,
     "AVAXUSDT": 0.1,
     "LINKUSDT": 0.1,
     "DOTUSDT": 0.1,
