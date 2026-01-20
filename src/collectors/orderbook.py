@@ -6,7 +6,6 @@ Used for absorption analysis, liquidity detection, sweep flags
 import asyncio
 import time
 import random
-import socket
 from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass
@@ -200,26 +199,11 @@ class OrderBookCollector:
         # Reset reconnect flag
         self._force_reconnect = False
         
-        # Create socket with TCP keepalive to prevent NAT timeout
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        # Set keepalive parameters (platform-specific, may not work on all OS)
-        try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-        except (AttributeError, OSError):
-            pass  # Not available on all platforms
-        
-        # Use timeout for connection with extra headers
+        # Use timeout for connection
         async with asyncio.timeout(self._ws_config.connect_timeout):
             ws = await websockets.connect(
                 self.ws_url,
                 **self._ws_config.to_kwargs(),
-                extra_headers={
-                    "User-Agent": "HYDRA-Trading-Bot/3.0",
-                    "Origin": "https://fapi.binance.com",
-                },
             )
         
         async with ws:
