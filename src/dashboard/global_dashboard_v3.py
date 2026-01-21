@@ -50,9 +50,16 @@ MAX_REJECTION_HISTORY = 20
 # Close position callback (set by runner)
 _close_position_callback: Optional[Any] = None
 
+# Manual signal callback (set by runner)
+_manual_signal_callback: Optional[Any] = None
+
 def set_close_position_callback(callback):
     global _close_position_callback
     _close_position_callback = callback
+
+def set_manual_signal_callback(callback):
+    global _manual_signal_callback
+    _manual_signal_callback = callback
 
 
 async def broadcast_pipeline_state(symbol: str, state: dict) -> None:
@@ -242,6 +249,25 @@ async def close_position_api(symbol: str):
         return JSONResponse({"success": result.get("success", False), "data": result})
     except Exception as e:
         logger.error("close_position_api_error", symbol=symbol, error=str(e)[:100])
+        return JSONResponse({"success": False, "error": str(e)[:100]}, status_code=500)
+
+
+@app.post("/api/signal/{symbol}/{direction}")
+async def manual_signal_api(symbol: str, direction: str):
+    """API endpoint to manually trigger a FUNDING_PRESSURE signal"""
+    global _manual_signal_callback
+    
+    if _manual_signal_callback is None:
+        return JSONResponse({"success": False, "error": "No callback registered"}, status_code=500)
+    
+    if direction.upper() not in ["LONG", "SHORT"]:
+        return JSONResponse({"success": False, "error": "Direction must be LONG or SHORT"}, status_code=400)
+    
+    try:
+        result = await _manual_signal_callback(symbol, direction.upper())
+        return JSONResponse({"success": result.get("success", False), "data": result})
+    except Exception as e:
+        logger.error("manual_signal_api_error", symbol=symbol, direction=direction, error=str(e)[:100])
         return JSONResponse({"success": False, "error": str(e)[:100]}, status_code=500)
 
 
@@ -709,14 +735,23 @@ DASHBOARD_HTML_V3 = """
                 `;
             }
             
+            // Manual signal buttons (only show when no open trade)
+            const manualBtns = !d.has_open_trade ? `
+                <div style="display: flex; gap: 4px; margin-left: 8px;">
+                    <button id="sig-long-${symbol}" onclick="triggerSignal('${symbol}', 'LONG')" style="background: #00aa55; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.65rem; font-weight: 700; cursor: pointer;">L</button>
+                    <button id="sig-short-${symbol}" onclick="triggerSignal('${symbol}', 'SHORT')" style="background: #aa3355; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.65rem; font-weight: 700; cursor: pointer;">S</button>
+                </div>
+            ` : '';
+            
             return `
                 <div class="${cardClasses.join(' ')}" id="card-${symbol}">
                     <div class="pair-header">
-                        <div>
+                        <div style="display: flex; align-items: center;">
                             <span class="symbol">${symbol}</span>
                             <span class="badge regime-${d.regime || 'UNKNOWN'}">${d.regime || 'UNKNOWN'}</span>
                             <span class="badge bias-${d.bias_direction || 'NEUTRAL'}">${d.bias_direction || 'N'}</span>
                             ${badges}
+                            ${manualBtns}
                         </div>
                         <span class="price">$${formatPrice(d.price)}</span>
                     </div>
@@ -978,6 +1013,28 @@ DASHBOARD_HTML_V3 = """
                 }
             } catch (e) {
                 if (btn) { btn.textContent = 'Error'; btn.style.background = '#ff4444'; btn.disabled = false; }
+            }
+        }
+        
+        async function triggerSignal(symbol, direction) {
+            const btn = document.getElementById('sig-' + direction.toLowerCase() + '-' + symbol);
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '...';
+            }
+            try {
+                const response = await fetch('/api/signal/' + symbol + '/' + direction, { method: 'POST' });
+                const result = await response.json();
+                if (result.success) {
+                    if (btn) { btn.textContent = direction === 'LONG' ? '✓ L' : '✓ S'; btn.style.background = '#00ff88'; }
+                    setTimeout(() => { if (btn) { btn.textContent = direction === 'LONG' ? 'L' : 'S'; btn.style.background = direction === 'LONG' ? '#00aa55' : '#aa3355'; btn.disabled = false; } }, 2000);
+                } else {
+                    if (btn) { btn.textContent = '✗'; btn.style.background = '#ff4444'; }
+                    setTimeout(() => { if (btn) { btn.textContent = direction === 'LONG' ? 'L' : 'S'; btn.style.background = direction === 'LONG' ? '#00aa55' : '#aa3355'; btn.disabled = false; } }, 2000);
+                }
+            } catch (e) {
+                if (btn) { btn.textContent = '✗'; btn.style.background = '#ff4444'; }
+                setTimeout(() => { if (btn) { btn.textContent = direction === 'LONG' ? 'L' : 'S'; btn.style.background = direction === 'LONG' ? '#00aa55' : '#aa3355'; btn.disabled = false; } }, 2000);
             }
         }
         

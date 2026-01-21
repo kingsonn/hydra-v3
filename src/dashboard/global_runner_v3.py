@@ -53,7 +53,7 @@ from src.stage3_v3.signals import (
 )
 from src.stage6.position_sizer_v3 import PositionSizerV3, PositionResultV3
 from src.stage7.trade_manager_v3 import TradeManagerV3
-from src.dashboard.global_dashboard_v3 import broadcast_closed_trades, set_close_position_callback
+from src.dashboard.global_dashboard_v3 import broadcast_closed_trades, set_close_position_callback, set_manual_signal_callback
 
 logger = structlog.get_logger(__name__)
 
@@ -204,6 +204,9 @@ class GlobalPipelineRunnerV3:
         
         # Register manual close callback for dashboard Signal Status button
         set_close_position_callback(self._manual_close_position)
+        
+        # Register manual signal callback for dashboard Long/Short buttons
+        set_manual_signal_callback(self._manual_signal_trigger)
         
         # Stage 1 orchestrator (will be initialized in start)
         self.stage1: Optional[Stage1Orchestrator] = None
@@ -807,6 +810,76 @@ class GlobalPipelineRunnerV3:
             closed_trades = self.trade_manager.get_closed_trades(limit=50)
             await broadcast_closed_trades(closed_trades)
         return result
+    
+    async def _manual_signal_trigger(self, symbol: str, direction: str) -> Dict[str, Any]:
+        """Manual signal trigger from dashboard Long/Short buttons - mimics FUNDING_PRESSURE signal"""
+        logger.info("manual_signal_requested", symbol=symbol, direction=direction)
+        
+        # Check if already holding this symbol
+        if self.position_sizer.is_holding(symbol):
+            return {"success": False, "error": f"Already holding {symbol}"}
+        
+        # Get current market state
+        alpha_state = self.alpha_processor.get_state(symbol)
+        if alpha_state is None:
+            return {"success": False, "error": f"No alpha state for {symbol}"}
+        
+        current_price = alpha_state.current_price
+        if current_price <= 0:
+            return {"success": False, "error": f"Invalid price for {symbol}"}
+        
+        # Create a fake FUNDING_PRESSURE signal
+        from src.stage3_v3.models import HybridSignal, Direction, SignalType, MarketRegime
+        
+        # Calculate stop/target based on ATR
+        atr_pct = alpha_state.atr_short / current_price if current_price > 0 else 0.015
+        stop_pct = max(0.012, min(0.020, atr_pct * 1.2))
+        target_pct = stop_pct * 2.5
+        
+        signal = HybridSignal(
+            direction=Direction.LONG if direction == "LONG" else Direction.SHORT,
+            signal_type=SignalType.FUNDING_TREND,
+            confidence=0.75,
+            entry_price=current_price,
+            stop_pct=stop_pct,
+            target_pct=target_pct,
+            reason=f"{direction} signal triggered via funding_trend signal",
+            bias_strength=alpha_state.trend_strength_1h,
+            regime=MarketRegime.TRENDING_UP if direction == "LONG" else MarketRegime.TRENDING_DOWN,
+        )
+        
+        # Run through position sizer
+        position_result = self.position_sizer.calculate_position(
+            symbol=symbol,
+            side=direction,
+            entry_price=current_price,
+            stop_pct=stop_pct,
+            target_pct=target_pct,
+            signal_name="FUNDING_PRESSURE",
+        )
+        
+        if not position_result.allowed:
+            return {"success": False, "error": f"Position rejected: {position_result.rejection_reason}"}
+        
+        # Place the trade
+        trade_opened = await self.trade_manager.place_position(
+            signal=signal,
+            position=position_result.position,
+        )
+        
+        if trade_opened:
+            self.position_sizer.add_hold(symbol)
+            logger.info(
+                "manual_signal_trade_opened",
+                symbol=symbol,
+                direction=direction,
+                entry=current_price,
+                size=position_result.position.size,
+                notional=position_result.position.notional,
+            )
+            return {"success": True, "data": {"symbol": symbol, "direction": direction, "entry": current_price}}
+        else:
+            return {"success": False, "error": "Trade placement failed"}
     
     def get_health_metrics(self) -> Dict[str, Any]:
         """Get overall health metrics"""
