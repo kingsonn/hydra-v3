@@ -440,8 +440,12 @@ class TradeManagerV3:
             # Upload AI decision log for competition and save locally
             if weex_order_id and market_state and signal:
                 try:
+                    logger.info("ai_log_generation_start", symbol=symbol, order_id=weex_order_id)
                     ai_log = generate_ai_log(weex_order_id, market_state, signal)
+                    logger.info("ai_log_generated", stage=ai_log.stage, model=ai_log.model)
+                    
                     # Upload to WEEX
+                    logger.info("ai_log_upload_start", order_id=ai_log.order_id)
                     await self._weex_client.upload_ai_log(
                         order_id=ai_log.order_id,
                         stage=ai_log.stage,
@@ -450,6 +454,8 @@ class TradeManagerV3:
                         output_data=ai_log.output_data,
                         explanation=ai_log.explanation,
                     )
+                    logger.info("ai_log_uploaded", order_id=ai_log.order_id)
+                    
                     # Save locally to ai_logs.json
                     _save_ai_log({
                         "order_id": ai_log.order_id,
@@ -462,10 +468,12 @@ class TradeManagerV3:
                         "output": ai_log.output_data,
                         "explanation": ai_log.explanation,
                     })
+                    logger.info("ai_log_saved_locally", order_id=ai_log.order_id)
                 except Exception as e:
-                    logger.warning("ai_log_upload_error", error=str(e)[:100])
+                    logger.error("ai_log_upload_error", symbol=symbol, error=str(e)[:200], exc_info=True)
         
         # Create trade record
+        logger.info("trade_record_creation_start", symbol=symbol)
         trade = TradeRecordV3(
             order_id=weex_order_id or order_id,
             symbol=symbol,
@@ -485,13 +493,16 @@ class TradeManagerV3:
             signal_name=position.signal_name,
             created_at=datetime.now().isoformat(),
         )
+        logger.info("trade_record_created", symbol=symbol, order_id=trade.order_id)
         
         # Update account
         self._account.margin_used += required_margin
         self._account.margin_available -= required_margin
+        logger.info("account_updated", symbol=symbol, margin_used=trade.margin, margin_available=self._account.margin_available)
         
         # Store trade
         self._open_trades[symbol] = trade
+        logger.info("trade_stored", symbol=symbol, total_open_trades=len(self._open_trades))
         
         # Save position metadata to meta_v6.json
         _save_position_meta(symbol, {
