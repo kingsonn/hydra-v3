@@ -394,6 +394,8 @@ class AlphaDataBootstrap:
                 async with session.get(url, params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        # Clear history before adding to avoid duplicates on re-runs
+                        self.funding_data[symbol].history.clear()
                         for item in data:
                             ts = int(item["fundingTime"])
                             rate = float(item["fundingRate"])
