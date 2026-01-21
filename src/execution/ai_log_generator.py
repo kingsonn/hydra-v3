@@ -201,7 +201,7 @@ def _build_output_scores(state: MarketState, signal: HybridSignal) -> Dict[str, 
     
     # Calculate component confidences based on state
     funding_conf = min(abs(state.funding_z) / 2.0, 1.0)  # Z-score normalized
-    oi_conf = min(abs(state.oi_delta_24h) * 5, 1.0)  # OI change normalized
+    oi_conf = min(abs(state.oi_change_24h) * 5, 1.0)  # OI change normalized
     liq_conf = min(abs(state.liq_imbalance_1h), 1.0)  # Already 0-1
     momentum_conf = min(abs(state.price_change_24h) * 10, 1.0)  # Price change normalized
     
@@ -295,7 +295,7 @@ def _generate_explanation(state: MarketState, signal: HybridSignal) -> str:
         "confidence": signal.confidence,
         "range_hours": range_hours,
         "range_pct": range_pct,
-        "oi_change": state.oi_delta_24h,
+        "oi_change": state.oi_change_24h,
         "vol_ratio": state.volume_ratio,
         "price_move": abs(state.price_change_48h),
         "cross_dir": cross_dir,
