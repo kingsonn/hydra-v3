@@ -15,6 +15,8 @@ import base64
 import json
 import asyncio
 import aiohttp
+from aiohttp import ClientTimeout, TCPConnector
+from aiohttp.resolver import AsyncResolver
 import structlog
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
@@ -23,7 +25,6 @@ from enum import Enum
 from config.settings import settings
 
 logger = structlog.get_logger(__name__)
-
 
 # =============================================================================
 # SYMBOL MAPPING
@@ -151,7 +152,23 @@ class WeexClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session"""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            try:
+                resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4", "1.1.1.1"])
+            except Exception:
+                resolver = None
+ 
+            connector = TCPConnector(
+                ttl_dns_cache=300,
+                limit=100,
+                limit_per_host=30,
+                force_close=False,
+                enable_cleanup_closed=True,
+                family=0,
+                resolver=resolver,
+                use_dns_cache=True,
+            )
+            timeout = ClientTimeout(total=30, connect=10, sock_connect=10)
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
     
     async def close(self):
@@ -286,15 +303,25 @@ class WeexClient:
                 if response.status == 200:
                     try:
                         data = json.loads(text)
-                        return True, data
                     except json.JSONDecodeError:
                         return False, {"error": "Invalid JSON response", "text": text}
+
+                    # WEEX typically returns {"code":"00000", "data":{...}, "msg":"..."}
+                    # Some endpoints may return a dict without a top-level code on success.
+                    if isinstance(data, dict) and "code" in data:
+                        return data.get("code") == "00000", data
+                    return True, data
                 else:
                     logger.error("weex_request_failed",
                                status=response.status,
                                endpoint=endpoint,
-                               response=text[:200])
-                    return False, {"error": f"HTTP {response.status}", "text": text}
+                               response=text[:500])
+                    return False, {
+                        "error": f"HTTP {response.status}",
+                        "status": response.status,
+                        "endpoint": endpoint,
+                        "text": text,
+                    }
                     
         except asyncio.TimeoutError:
             logger.error("weex_request_timeout", endpoint=endpoint)
@@ -473,6 +500,38 @@ class WeexClient:
                 client_oid=client_oid,
                 raw_response=response
             )
+        
+        # Some WEEX responses may omit the top-level code but still return an order id.
+        if success:
+            data = response.get("data") if isinstance(response, dict) else None
+            if isinstance(data, dict):
+                order_id = data.get("order_id") or data.get("orderId")
+            else:
+                order_id = response.get("order_id") if isinstance(response, dict) else None
+                order_id = order_id or (response.get("orderId") if isinstance(response, dict) else None)
+ 
+            if order_id:
+                self.total_orders_placed += 1
+                self.positions[symbol] = Position(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_price,
+                    size=float(size),
+                    order_id=order_id,
+                    client_oid=client_oid,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                )
+                logger.info("weex_order_placed",
+                           symbol=symbol,
+                           order_id=order_id,
+                           client_oid=client_oid)
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    client_oid=client_oid,
+                    raw_response=response,
+                )
         else:
             self.total_orders_failed += 1
             error_msg = response.get("msg") or response.get("error") or "Unknown error"
@@ -646,6 +705,11 @@ class WeexClient:
         if success:
             logger.info("ai_log_uploaded", order_id=order_id, stage=stage)
         else:
-            logger.warning("ai_log_upload_failed", order_id=order_id, error=response)
+            logger.warning(
+                "ai_log_upload_failed",
+                order_id=order_id,
+                endpoint="/capi/v2/order/uploadAiLog",
+                error=response,
+            )
         
         return success, response

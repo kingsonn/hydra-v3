@@ -831,8 +831,9 @@ class GlobalPipelineRunnerV3:
         # Create a fake FUNDING_PRESSURE signal
         from src.stage3_v3.models import (
             HybridSignal, Direction, SignalType, MarketRegime, 
-            MarketState, Bias, TrendState
+            MarketState, TrendState
         )
+        from src.stage3_v3.bias import calculate_bias
         
         # Calculate stop/target based on ATR
         atr_pct = alpha_state.atr_short / current_price if current_price > 0 else 0.015
@@ -846,21 +847,18 @@ class GlobalPipelineRunnerV3:
             entry_price=current_price,
             stop_pct=stop_pct,
             target_pct=target_pct,
-            reason=f"{direction} signal triggered via signal trigger",
+            reason=f"{direction} signal triggered via funding_trend signal",
             bias_strength=alpha_state.trend_strength_1h,
             regime=MarketRegime.TRENDING_UP if direction == "LONG" else MarketRegime.TRENDING_DOWN,
         )
         
         # Convert AlphaState to MarketState for AI log generation
-        bias = Bias(
-            direction=alpha_state.trend_direction_1h,
-            strength=alpha_state.trend_strength_1h,
+        bias = calculate_bias(
             funding_z=alpha_state.funding_z,
-            cumulative_funding=alpha_state.cumulative_funding_24h,
-            oi_change_1h=alpha_state.oi_change_1h,
-            oi_change_4h=alpha_state.oi_change_4h,
-            oi_change_24h=alpha_state.oi_change_24h,
-            liq_imbalance_1h=alpha_state.liq_imbalance_1h,
+            liq_imbalance_4h=alpha_state.liq_imbalance_4h,
+            oi_delta_24h=alpha_state.oi_change_24h,
+            price_change_4h=alpha_state.price_change_4h,
+            price_change_24h=alpha_state.price_change_24h,
         )
         
         regime = MarketRegime.TRENDING_UP if direction == "LONG" else MarketRegime.TRENDING_DOWN
@@ -876,7 +874,6 @@ class GlobalPipelineRunnerV3:
             lower_high=False,
             lower_low=False,
             rsi_14=alpha_state.rsi_14,
-            is_pullback_to_ema=lambda threshold_pct=0.003: False,  # Simplified
         )
         
         market_state = MarketState(

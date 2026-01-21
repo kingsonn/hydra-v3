@@ -183,7 +183,9 @@ def _build_input_features(state: MarketState, signal: HybridSignal) -> Dict[str,
             "bias_strength": round(state.bias.strength if state.bias else 0, 3),
             "funding_component": round(state.bias.funding_score if state.bias else 0, 3),
             "oi_component": round(state.bias.oi_score if state.bias else 0, 3),
-            "liquidation_component": round(state.bias.liq_score if state.bias else 0, 3),
+            "liquidation_component": round(state.bias.liquidation_score if state.bias else 0, 3),
+            "trend_component": round(state.bias.trend_score if state.bias else 0, 3),
+            "reason": state.bias.reason if state.bias else "",
         },
         
         # Signal Detection
@@ -221,7 +223,7 @@ def _build_output_scores(state: MarketState, signal: HybridSignal) -> Dict[str, 
             "regime_classification_score": round(regime_conf, 3),
             "trend_alignment_score": round(trend_conf, 3),
             "momentum_score": round(momentum_conf, 3),
-            "bias_directional_score": round(state.bias.strength if state.bias else 0.5, 3),
+            "bias_directional_score": round(state.bias.strength if state.bias else 0, 3),
         },
         
         "gating_checks": {
