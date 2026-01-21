@@ -26,6 +26,7 @@ from src.stage3_v3.models import (
 # Professional model names for the competition
 MODEL_NAME = "Hybrid-Quant Signal Engine v3 (HQSE-v3)"
 STAGE_NAME = "Quantitative Signal Detection & Risk-Adjusted Gating"
+AUDIT_FOOTER = " For code audit visit https://github.com/kingsonn/hydra-v3 or reach out to @hanson_25 on telegram."
 
 # Signal type to explanation mapping
 SIGNAL_EXPLANATIONS = {
@@ -118,7 +119,7 @@ def generate_ai_log(
     output_data = _build_output_scores(state, signal)
     
     # Generate explanation based on signal type
-    explanation = _generate_explanation(state, signal)
+    explanation = _generate_explanation(state, signal) + AUDIT_FOOTER
     
     return AILogData(
         order_id=order_id,
