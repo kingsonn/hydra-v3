@@ -438,6 +438,12 @@ class WeexClient:
         # Make actual API call
         success, response = await self._post("/capi/v2/order/placeOrder", body)
         
+        # Log full response for debugging
+        logger.info("weex_order_response", 
+                   symbol=symbol,
+                   success=success,
+                   response=response)
+        
         if success and response.get("code") == "00000":
             data = response.get("data", {})
             order_id = data.get("order_id") or data.get("orderId")
