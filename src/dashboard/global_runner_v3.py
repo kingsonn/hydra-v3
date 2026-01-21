@@ -864,8 +864,9 @@ class GlobalPipelineRunnerV3:
         
         # Place the trade
         trade_opened = await self.trade_manager.place_position(
-            signal=signal,
             position=position_result.position,
+            market_state=alpha_state,
+            signal=signal,
         )
         
         if trade_opened:
