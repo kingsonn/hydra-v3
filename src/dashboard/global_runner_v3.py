@@ -829,7 +829,10 @@ class GlobalPipelineRunnerV3:
             return {"success": False, "error": f"Invalid price for {symbol}"}
         
         # Create a fake FUNDING_PRESSURE signal
-        from src.stage3_v3.models import HybridSignal, Direction, SignalType, MarketRegime
+        from src.stage3_v3.models import (
+            HybridSignal, Direction, SignalType, MarketRegime, 
+            MarketState, Bias, TrendState
+        )
         
         # Calculate stop/target based on ATR
         atr_pct = alpha_state.atr_short / current_price if current_price > 0 else 0.015
@@ -843,9 +846,74 @@ class GlobalPipelineRunnerV3:
             entry_price=current_price,
             stop_pct=stop_pct,
             target_pct=target_pct,
-            reason=f"{direction} signal triggered via funding_trend signal",
+            reason=f"{direction} signal triggered via signal trigger",
             bias_strength=alpha_state.trend_strength_1h,
             regime=MarketRegime.TRENDING_UP if direction == "LONG" else MarketRegime.TRENDING_DOWN,
+        )
+        
+        # Convert AlphaState to MarketState for AI log generation
+        bias = Bias(
+            direction=alpha_state.trend_direction_1h,
+            strength=alpha_state.trend_strength_1h,
+            funding_z=alpha_state.funding_z,
+            cumulative_funding=alpha_state.cumulative_funding_24h,
+            oi_change_1h=alpha_state.oi_change_1h,
+            oi_change_4h=alpha_state.oi_change_4h,
+            oi_change_24h=alpha_state.oi_change_24h,
+            liq_imbalance_1h=alpha_state.liq_imbalance_1h,
+        )
+        
+        regime = MarketRegime.TRENDING_UP if direction == "LONG" else MarketRegime.TRENDING_DOWN
+        regime_confidence = alpha_state.trend_strength_1h
+        
+        trend = TrendState(
+            ema_20=alpha_state.ema_20_1h,
+            ema_50=alpha_state.ema_50_1h,
+            direction=alpha_state.trend_direction_1h,
+            strength=alpha_state.trend_strength_1h,
+            higher_high=False,
+            higher_low=False,
+            lower_high=False,
+            lower_low=False,
+            rsi_14=alpha_state.rsi_14,
+            is_pullback_to_ema=lambda threshold_pct=0.003: False,  # Simplified
+        )
+        
+        market_state = MarketState(
+            symbol=symbol,
+            timestamp_ms=alpha_state.timestamp_ms,
+            current_price=current_price,
+            bias=bias,
+            regime=regime,
+            regime_confidence=regime_confidence,
+            trend=trend,
+            funding_z=alpha_state.funding_z,
+            funding_rate=alpha_state.funding_rate,
+            cumulative_funding_24h=alpha_state.cumulative_funding_24h,
+            oi_delta_1h=alpha_state.oi_change_1h,
+            oi_delta_4h=alpha_state.oi_change_4h,
+            oi_delta_24h=alpha_state.oi_change_24h,
+            liq_imbalance_1h=alpha_state.liq_imbalance_1h,
+            liq_imbalance_4h=alpha_state.liq_imbalance_1h,  # Use 1h as fallback
+            liq_total_1h=alpha_state.liq_long_usd_1h + alpha_state.liq_short_usd_1h,
+            liq_long_1h=alpha_state.liq_long_usd_1h,
+            liq_short_1h=alpha_state.liq_short_usd_1h,
+            cascade_active=alpha_state.cascade_active,
+            liq_exhaustion=alpha_state.liq_exhaustion,
+            atr_14=alpha_state.atr_short,
+            vol_expansion_ratio=alpha_state.vol_expansion_ratio,
+            range_4h=alpha_state.high_4h - alpha_state.low_4h,
+            range_vs_atr=1.0,  # Simplified
+            high_4h=alpha_state.high_4h,
+            low_4h=alpha_state.low_4h,
+            high_24h=alpha_state.high_24h,
+            low_24h=alpha_state.low_24h,
+            price_change_1h=alpha_state.price_change_1h,
+            price_change_4h=alpha_state.price_change_4h,
+            price_change_24h=alpha_state.price_change_24h,
+            price_change_48h=alpha_state.price_change_48h,
+            volume_ratio=alpha_state.volume_ratio,
+            bar_closes_1h=[],  # Not needed for AI log
         )
         
         # Run through position sizer
@@ -865,7 +933,7 @@ class GlobalPipelineRunnerV3:
         # Place the trade
         trade_opened = await self.trade_manager.place_position(
             position=position_result.position,
-            market_state=alpha_state,
+            market_state=market_state,
             signal=signal,
         )
         

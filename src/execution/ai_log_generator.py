@@ -142,11 +142,11 @@ def _build_input_features(state: MarketState, signal: HybridSignal) -> Dict[str,
             "funding_rate": round(state.funding_rate, 6),
             "funding_z_score": round(state.funding_z, 3),
             "cumulative_funding_24h": round(state.cumulative_funding_24h, 5),
-            "oi_delta_1h": round(state.oi_change_1h, 4),
-            "oi_delta_4h": round(state.oi_change_4h, 4),
-            "oi_delta_24h": round(state.oi_change_24h, 4),
-            "liquidation_long_1h_usd": round(state.liq_long_usd_1h, 0),
-            "liquidation_short_1h_usd": round(state.liq_short_usd_1h, 0),
+            "oi_delta_1h": round(state.oi_delta_1h, 4),
+            "oi_delta_4h": round(state.oi_delta_4h, 4),
+            "oi_delta_24h": round(state.oi_delta_24h, 4),
+            "liquidation_long_1h_usd": round(state.liq_long_1h, 0),
+            "liquidation_short_1h_usd": round(state.liq_short_1h, 0),
             "liquidation_imbalance_1h": round(state.liq_imbalance_1h, 3),
             "cascade_active": state.cascade_active,
         },
@@ -201,7 +201,7 @@ def _build_output_scores(state: MarketState, signal: HybridSignal) -> Dict[str, 
     
     # Calculate component confidences based on state
     funding_conf = min(abs(state.funding_z) / 2.0, 1.0)  # Z-score normalized
-    oi_conf = min(abs(state.oi_change_24h) * 5, 1.0)  # OI change normalized
+    oi_conf = min(abs(state.oi_delta_24h) * 5, 1.0)  # OI change normalized
     liq_conf = min(abs(state.liq_imbalance_1h), 1.0)  # Already 0-1
     momentum_conf = min(abs(state.price_change_24h) * 10, 1.0)  # Price change normalized
     
@@ -295,7 +295,7 @@ def _generate_explanation(state: MarketState, signal: HybridSignal) -> str:
         "confidence": signal.confidence,
         "range_hours": range_hours,
         "range_pct": range_pct,
-        "oi_change": state.oi_change_24h,
+        "oi_change": state.oi_delta_24h,
         "vol_ratio": state.volume_ratio,
         "price_move": abs(state.price_change_48h),
         "cross_dir": cross_dir,

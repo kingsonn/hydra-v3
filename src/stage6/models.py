@@ -14,7 +14,7 @@ SYMBOL_STEP_SIZES: Dict[str, float] = {
     "BNBUSDT": 0.01,
     "XRPUSDT": 0.1,
     "DOGEUSDT": 1.0,
-    "ADAUSDT": 0.1,
+    "ADAUSDT": 10.0,
     "LTCUSDT": 0.001,
 }
 
