@@ -114,18 +114,12 @@ class FundingPressureContinuation:
         if funding_direction == Direction.LONG:
             if not trend.is_uptrend():
                 return None
-            if trend.ema_20 <= trend.ema_50:  # Need bullish EMA alignment
-                return None
-            if not (trend.higher_high or trend.higher_low):  # Need bullish structure
-                return None
+          
             direction = Direction.LONG
         else:
             if not trend.is_downtrend():
                 return None
-            if trend.ema_20 >= trend.ema_50:  # Need bearish EMA alignment
-                return None
-            if not (trend.lower_high or trend.lower_low):  # Need bearish structure
-                return None
+            
             direction = Direction.SHORT
         
         # GATE 5: Trend strength minimum

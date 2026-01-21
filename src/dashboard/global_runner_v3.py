@@ -557,6 +557,8 @@ class GlobalPipelineRunnerV3:
                 "ema_20": alpha_state.ema_20_1h,
                 "ema_50": alpha_state.ema_50_1h,
                 "rsi_14": alpha_state.rsi_14,
+                "price_vs_ema20": ((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h * 100) if alpha_state.ema_20_1h > 0 else 0,
+                "entry_state": "PULLBACK_READY" if alpha_state.ema_20_1h > 0 and abs((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h) < 0.008 else ("EXTENDED" if alpha_state.ema_20_1h > 0 and abs((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h) > 0.02 else "WAITING"),
                 
                 # Bias
                 "bias_direction": bias.direction.value,
