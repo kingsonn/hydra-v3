@@ -297,6 +297,17 @@ class PositionSizerV3:
         """Check if symbol has active position"""
         return self._holding.get(symbol, False)
     
+    def add_hold(self, symbol: str):
+        """Mark symbol as holding (position opened)"""
+        self._holding[symbol] = True
+        logger.debug("position_hold_added", symbol=symbol)
+    
+    def release_hold(self, symbol: str):
+        """Release hold on symbol (position closed)"""
+        if symbol in self._holding:
+            del self._holding[symbol]
+        logger.debug("position_hold_released", symbol=symbol)
+    
     def clear_position(self, symbol: str):
         """Clear position when closed"""
         if symbol in self._active_positions:

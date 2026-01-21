@@ -855,6 +855,7 @@ class GlobalPipelineRunnerV3:
             entry_price=current_price,
             stop_pct=stop_pct,
             target_pct=target_pct,
+            signal_type="FUNDING_TREND",
             signal_name="FUNDING_PRESSURE",
         )
         
