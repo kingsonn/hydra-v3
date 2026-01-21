@@ -80,7 +80,7 @@
       "take_profit_pct": 3.0
     }
   },
-  "explanation": "Detected extreme funding rate pressure (0.58σ) aligned with SHORT trend. Cumulative 24h funding of 0.028% indicates strong directional conviction. Price has pulled back 0.48% to dynamic support, providing optimal entry. Regime classified as TRENDING_DOWN with 81% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target."
+  "explanation": "Detected extreme funding rate pressure (0.58σ) aligned with SHORT trend. Cumulative 24h funding of 0.028% indicates strong directional conviction. Price has pulled back 0.48% to dynamic support, providing optimal entry. Regime classified as TRENDING_DOWN with 81% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target. For code audit visit https://github.com/kingsonn/hydra-v3 or reach out to @hanson_25 on telegram."
 },{
   "order_id": "708831350576119822",
   "timestamp": "2026-01-21T12:29:23.123456",
@@ -163,7 +163,7 @@
       "take_profit_pct": 3.0
     }
   },
-  "explanation": "Detected extreme funding rate pressure (0.52σ) aligned with SHORT trend. Cumulative 24h funding of 0.025% indicates strong directional conviction. Price has pulled back 0.45% to dynamic support, providing optimal entry. Regime classified as TRENDING_DOWN with 78% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target."
+  "explanation": "Detected extreme funding rate pressure (0.52σ) aligned with SHORT trend. Cumulative 24h funding of 0.025% indicates strong directional conviction. Price has pulled back 0.45% to dynamic support, providing optimal entry. Regime classified as TRENDING_DOWN with 78% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target. For code audit visit https://github.com/kingsonn/hydra-v3 or reach out to @hanson_25 on telegram."
 } ,{
   "order_id": "708859166805983246",
   "timestamp": "2026-01-21T14:19:55.123456",
@@ -246,5 +246,5 @@
       "take_profit_pct": 3.0
     }
   },
-  "explanation": "Detected extreme funding rate pressure (-1.14σ) aligned with LONG trend. Cumulative 24h funding of -0.014% indicates strong directional conviction. Price has pulled back 0.67% to dynamic support, providing optimal entry. Regime classified as TRENDING_UP with 73% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target."
+  "explanation": "Detected extreme funding rate pressure (-1.14σ) aligned with LONG trend. Cumulative 24h funding of -0.014% indicates strong directional conviction. Price has pulled back 0.67% to dynamic support, providing optimal entry. Regime classified as TRENDING_UP with 73% confidence. Position sized at 1.0x base allocation with 2.5R risk-reward target. For code audit visit https://github.com/kingsonn/hydra-v3 or reach out to @hanson_25 on telegram."
 }]
