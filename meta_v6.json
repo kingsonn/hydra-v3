@@ -16,5 +16,23 @@
     "created_at": "2026-01-21T18:13:24.123456",
     "breakeven_triggered": false,
     "trail_1r_triggered": false
+  },
+    "SOLUSDT": {
+    "order_id": "708859166805983246",
+    "symbol": "SOLUSDT",
+    "side": "LONG",
+    "entry_price": 128.81,
+    "size": 11.4,
+    "notional": 1468.43,
+    "stop_price": 127.26428,
+    "stop_pct": 0.012,
+    "target_price": 132.6743,
+    "target_pct": 0.03,
+    "current_stop": 127.26428,
+    "signal_type": "FUNDING_TREND",
+    "signal_name": "FUNDING_PRESSURE",
+    "created_at": "2026-01-21T14:19:55.123456",
+    "breakeven_triggered": false,
+    "trail_1r_triggered": false
   }
 }
