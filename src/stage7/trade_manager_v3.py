@@ -685,14 +685,20 @@ class TradeManagerV3:
             result = await self._weex_client.close_position(symbol)
             if result.success:
                 # Extract successOrderId from response
-                # Response format: [{"positionId": ..., "successOrderId": 123, ...}]
+                # Response format: [{"positionId": ..., "successOrderId": 123, ...}] or {"positionId": ..., "successOrderId": 123, ...}
                 raw = result.raw_response
                 if raw and raw.get("data"):
                     data = raw["data"]
+                    # Handle both list and dict response formats
                     if isinstance(data, list) and len(data) > 0:
                         close_order_id = str(data[0].get("successOrderId", ""))
-                        if close_order_id == "0":
-                            close_order_id = None
+                    elif isinstance(data, dict):
+                        close_order_id = str(data.get("successOrderId", ""))
+                    else:
+                        close_order_id = None
+                        
+                    if close_order_id == "0":
+                        close_order_id = None
                 
                 logger.info(
                     "weex_position_closed",
