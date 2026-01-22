@@ -95,7 +95,7 @@ STEP_SIZES = {
     "BNBUSDT": 0.01,
     "SOLUSDT": 0.1,
     "XRPUSDT": 0.1,
-    "DOGEUSDT": 1.0,
+    "DOGEUSDT": 100.0,
     "ADAUSDT": 1.0,
     "LTCUSDT": 0.1,
 }
