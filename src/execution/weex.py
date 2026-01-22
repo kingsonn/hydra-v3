@@ -423,8 +423,6 @@ class WeexClient:
             "order_type": "0",       # Normal order
             "match_price": "1",      # Market price
             "price": "",             # Empty for market orders
-            "presetTakeProfitPrice": str(round(target_price, 1)),
-            "presetStopLossPrice": str(round(stop_price, 1)),
         }
         
         logger.info("weex_place_order",
