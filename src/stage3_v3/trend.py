@@ -165,31 +165,97 @@ class TrendAnalyzer:
             self._lower_low = self._recent_swing_low < self._prev_swing_low
     
     def _infer_structure_from_closes(self, closes: List[float]):
-        """Infer structure from close prices when high/low not available"""
-        if len(closes) < 20:
+        """Infer structure from close prices using proper swing point detection"""
+        if len(closes) < 20:  # Need reasonable data for structure
             return
         
-        # Use closes as proxy for highs/lows
-        recent = closes[-20:]
+        # Use last 30 closes for structure analysis
+        recent_closes = closes[-30:]
         
-        # Simple structure: compare first half max/min to second half
-        first_half = recent[:10]
-        second_half = recent[10:]
+        # Find swing highs/lows using 3-bar lookback/forward (balanced approach)
+        swing_highs = []
+        swing_lows = []
         
-        first_high = max(first_half)
-        first_low = min(first_half)
-        second_high = max(second_half)
-        second_low = min(second_half)
+        for i in range(3, len(recent_closes) - 3):
+            # Swing high: higher than 3 closes on each side
+            if recent_closes[i] >= max(recent_closes[i-3:i]) and recent_closes[i] >= max(recent_closes[i+1:i+4]):
+                swing_highs.append((i, recent_closes[i]))
+            
+            # Swing low: lower than 3 closes on each side
+            if recent_closes[i] <= min(recent_closes[i-3:i]) and recent_closes[i] <= min(recent_closes[i+1:i+4]):
+                swing_lows.append((i, recent_closes[i]))
         
-        self._higher_high = second_high > first_high
-        self._higher_low = second_low > first_low
-        self._lower_high = second_high < first_high
-        self._lower_low = second_low < first_low
+        # Filter swings by significance (minimum 0.3% move from previous swing)
+        filtered_highs = []
+        filtered_lows = []
         
-        self._prev_swing_high = first_high
-        self._recent_swing_high = second_high
-        self._prev_swing_low = first_low
-        self._recent_swing_low = second_low
+        for idx, price in swing_highs:
+            if not filtered_highs or abs(price - filtered_highs[-1][1]) / filtered_highs[-1][1] > 0.003:
+                filtered_highs.append((idx, price))
+        
+        for idx, price in swing_lows:
+            if not filtered_lows or abs(price - filtered_lows[-1][1]) / filtered_lows[-1][1] > 0.003:
+                filtered_lows.append((idx, price))
+        
+        # If still no significant swings, use simple peak/trough comparison
+        if len(filtered_highs) < 2 and len(filtered_lows) < 2:
+            # Split into thirds for more reliable structure detection
+            third = len(recent_closes) // 3
+            first_third = recent_closes[:third]
+            middle_third = recent_closes[third:2*third]
+            last_third = recent_closes[2*third:]
+            
+            # Compare peaks and troughs across periods
+            first_peak = max(first_third)
+            middle_peak = max(middle_third)
+            last_peak = max(last_third)
+            
+            first_trough = min(first_third)
+            middle_trough = min(middle_third)
+            last_trough = min(last_third)
+            
+            # Determine structure from peak progression
+            if last_peak > middle_peak > first_peak:
+                self._higher_high = True
+                self._lower_high = False
+            elif last_peak < middle_peak < first_peak:
+                self._higher_high = False
+                self._lower_high = True
+            else:
+                self._higher_high = False
+                self._lower_high = False
+            
+            # Determine structure from trough progression
+            if last_trough > middle_trough > first_trough:
+                self._higher_low = True
+                self._lower_low = False
+            elif last_trough < middle_trough < first_trough:
+                self._higher_low = False
+                self._lower_low = True
+            else:
+                self._higher_low = False
+                self._lower_low = False
+                
+            return
+        
+        # Update structure from significant swing points
+        if len(filtered_highs) >= 2:
+            self._prev_swing_high = filtered_highs[-2][1]
+            self._recent_swing_high = filtered_highs[-1][1]
+            self._higher_high = self._recent_swing_high > self._prev_swing_high
+            self._lower_high = self._recent_swing_high < self._prev_swing_high
+        else:
+            self._higher_high = False
+            self._lower_high = False
+        
+        if len(filtered_lows) >= 2:
+            self._prev_swing_low = filtered_lows[-2][1]
+            self._recent_swing_low = filtered_lows[-1][1]
+            self._higher_low = self._recent_swing_low > self._prev_swing_low
+            self._lower_low = self._recent_swing_low < self._prev_swing_low
+        else:
+            self._higher_low = False
+            self._lower_low = False
     
     def _update_trend_direction(self, current_price: float):
         """Determine trend direction and strength"""

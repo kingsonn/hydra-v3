@@ -98,9 +98,45 @@ class AlphaState:
     # Order Flow (from order_flow.py)
     moi_flip_rate: float = 0.0  # MOI sign flips per minute - used for chop detection
     
+    # Price history for structure analysis
+    bar_closes_1h: List[float] = field(default_factory=list)
+    
     def to_market_state(self) -> MarketState:
         """Convert to stage3_v3.models.MarketState"""
-        # Build TrendState
+        # Calculate structure from 1H bars if available
+        higher_high = False
+        higher_low = False
+        lower_high = False
+        lower_low = False
+        
+        if len(self.bar_closes_1h) >= 20:
+            # Simple structure detection from closes
+            closes = self.bar_closes_1h[-30:] if len(self.bar_closes_1h) >= 30 else self.bar_closes_1h
+            
+            # Find swing points using 3-bar windows
+            if len(closes) >= 10:
+                # Split into thirds for structure analysis
+                third = len(closes) // 3
+                first_third = closes[:third]
+                middle_third = closes[third:2*third]
+                last_third = closes[2*third:]
+                
+                # Compare peaks and troughs
+                first_peak = max(first_third)
+                middle_peak = max(middle_third)
+                last_peak = max(last_third)
+                
+                first_trough = min(first_third)
+                middle_trough = min(middle_third)
+                last_trough = min(last_third)
+                
+                # Determine structure
+                higher_high = last_peak > middle_peak > first_peak
+                lower_high = last_peak < middle_peak < first_peak
+                higher_low = last_trough > middle_trough > first_trough
+                lower_low = last_trough < middle_trough < first_trough
+        
+        # Build TrendState with structure flags
         trend = TrendState(
             direction=self.trend_direction_1h,
             strength=self.trend_strength_1h,
@@ -110,6 +146,10 @@ class AlphaState:
             price_vs_ema20=((self.current_price - self.ema_20_1h) / self.ema_20_1h * 100) if self.ema_20_1h > 0 else 0,
             price_vs_ema50=((self.current_price - self.ema_50_1h) / self.ema_50_1h * 100) if self.ema_50_1h > 0 else 0,
             rsi_14=self.rsi_14,
+            higher_high=higher_high,
+            higher_low=higher_low,
+            lower_high=lower_high,
+            lower_low=lower_low,
         )
         
         # Regime will be calculated by RegimeClassifier in regime.py
@@ -246,6 +286,7 @@ class AlphaStateProcessor:
             # Initialize EMAs from price history
             closes = bootstrap.get_price_closes(symbol)
             if closes:
+                state.bar_closes_1h = closes.copy()  # Store for structure analysis
                 state.current_price = closes[-1]
                 state.ema_20_1h = self._compute_ema(closes, 20)
                 state.ema_50_1h = self._compute_ema(closes, 50)
@@ -413,6 +454,12 @@ class AlphaStateProcessor:
             return
         
         state = self._states[symbol]
+        
+        # Update bar history for structure analysis (maintain rolling window of 250 bars)
+        state.bar_closes_1h.append(close)
+        # Always maintain exactly 250 bars (rolling window)
+        if len(state.bar_closes_1h) > 250:
+            state.bar_closes_1h = state.bar_closes_1h[-250:]  # Keep last 250
         
         # Update EMAs incrementally
         if state.ema_20_1h > 0:

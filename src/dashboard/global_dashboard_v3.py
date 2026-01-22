@@ -848,6 +848,30 @@ DASHBOARD_HTML_V3 = """
                                 <div class="alpha-value">${formatNumber(d.ema_20, 0)}</div>
                             </div>
                             <div class="alpha-item">
+                                <div class="alpha-label">EMA50</div>
+                                <div class="alpha-value">${formatNumber(d.ema_50, 0)}</div>
+                            </div>
+                            <div class="alpha-item">
+                                <div class="alpha-label">Higher high</div>
+                                <div class="alpha-value">${d.trend_higher_high}</div>
+                            </div>
+                            <div class="alpha-item">
+                                <div class="alpha-label">Higer low</div>
+                                <div class="alpha-value">${d.trend_higher_low}</div>
+                            </div>
+                            <div class="alpha-item">
+                                <div class="alpha-label">Lower high</div>
+                                <div class="alpha-value">${d.trend_lower_high}</div>
+                            </div>
+                            <div class="alpha-item">
+                                <div class="alpha-label">Lower low</div>
+                                <div class="alpha-value">${d.trend_lower_low}</div>
+                            </div>
+                            <div class="alpha-item">
+                                <div class="alpha-label">Trend strength</div>
+                                <div class="alpha-value">${d.trend_strength}</div>
+                            </div>
+                            <div class="alpha-item">
                                 <div class="alpha-label">RSI</div>
                                 <div class="alpha-value ${d.rsi_14 > 70 ? 'negative' : (d.rsi_14 < 30 ? 'positive' : '')}">${formatNumber(d.rsi_14, 1)}</div>
                             </div>

@@ -555,13 +555,17 @@ class GlobalPipelineRunnerV3:
                 "liq_exhaustion": alpha_state.liq_exhaustion,
                 
                 # Trend
-                "trend_direction": alpha_state.trend_direction_1h.value,
-                "trend_strength": alpha_state.trend_strength_1h,
+                "trend_direction": trend.direction.value,
+                "trend_strength": trend.strength,
                 "ema_20": alpha_state.ema_20_1h,
                 "ema_50": alpha_state.ema_50_1h,
                 "rsi_14": alpha_state.rsi_14,
                 "price_vs_ema20": ((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h * 100) if alpha_state.ema_20_1h > 0 else 0,
                 "entry_state": "PULLBACK_READY" if alpha_state.ema_20_1h > 0 and abs((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h) < 0.008 else ("EXTENDED" if alpha_state.ema_20_1h > 0 and abs((alpha_state.current_price - alpha_state.ema_20_1h) / alpha_state.ema_20_1h) > 0.02 else "WAITING"),
+                "trend_higher_high": bool(trend.higher_high),
+                "trend_higher_low": bool(trend.higher_low),
+                "trend_lower_high": bool(trend.lower_high),
+                "trend_lower_low": bool(trend.lower_low),
                 
                 # Bias
                 "bias_direction": bias.direction.value,
