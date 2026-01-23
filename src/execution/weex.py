@@ -49,7 +49,7 @@ STEP_SIZES: Dict[str, float] = {
     "DOGEUSDT": 100.0,    # 10 DOGE
     "XRPUSDT": 10.0,      # 1 XRP
     "ADAUSDT": 10.0,     # 10 ADA (per exchange requirement)
-    "BNBUSDT": 0.01,     # 0.01 BNB
+    "BNBUSDT": 0.1,     # 0.01 BNB
     "LTCUSDT": 0.01,     # 0.01 LTC
 }
 

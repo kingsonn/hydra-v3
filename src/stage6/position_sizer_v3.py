@@ -92,7 +92,7 @@ class PositionResultV3:
 STEP_SIZES = {
     "BTCUSDT": 0.001,
     "ETHUSDT": 0.001,
-    "BNBUSDT": 0.01,
+    "BNBUSDT": 0.1,
     "SOLUSDT": 0.1,
     "XRPUSDT": 0.1,
     "DOGEUSDT": 100.0,
