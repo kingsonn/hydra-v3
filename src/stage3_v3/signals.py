@@ -761,7 +761,7 @@ class EMATrendContinuation:
     
     def __init__(self):
         self.name = "EMA_CONTINUATION"
-        self.pullback_threshold = 0.8  # Within 0.8% of EMA20
+        self.pullback_threshold = 0.3  # Within 0.8% of EMA20
         self.min_trend_strength = 0.3
         self.max_extension = 0.03  # Don't enter if already moved 3%+ in 1h
         
@@ -861,9 +861,9 @@ class EMATrendContinuation:
             confidence += 0.05
         
         # Funding aligned = boost
-        if direction == Direction.LONG and state.funding_z < -0.5:
+        if direction == Direction.LONG and state.funding_z < -0.8:
             confidence += 0.10  # Shorts crowded = fuel for longs
-        elif direction == Direction.SHORT and state.funding_z > 0.5:
+        elif direction == Direction.SHORT and state.funding_z > 0.8:
             confidence += 0.10  # Longs crowded = fuel for shorts
         
         # OI expanding in direction = boost
