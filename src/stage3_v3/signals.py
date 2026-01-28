@@ -197,11 +197,6 @@ class TrendPullbackSignal:
         self.rsi_range = (35, 65)  # Neutral RSI for optimal entry
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
-        """
-        DISABLED: This signal is disabled and will never return a signal.
-        """
-        return None  # DISABLED - Never return signals
-        
         """Evaluate trend pullback conditions"""
         
         # Need trending regime
