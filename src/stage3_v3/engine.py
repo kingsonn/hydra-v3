@@ -35,7 +35,7 @@ from src.stage3_v3.signals import (
     LiquidationFollowSignal,
     RangeBreakoutSignal,
     ExhaustionReversalSignal,
-    SMACrossover,
+    # SMACrossover,  # DISABLED per user request
 )
 # FIXED (Audit): Removed ADXExpansionMomentum (fake ADX), EMATrendContinuation (duplicate),
 # and CompressionBreakout (merged with RangeBreakout). Kept 5 core signals.
@@ -170,6 +170,7 @@ class HybridAlphaEngine:
         # - EMATrendContinuation (duplicate of TrendPullback)
         # - CompressionBreakout (merged into RangeBreakout)
         # - StructureBreakRetest (kept but not in core set)
+        # DISABLED: EMA continuation and SMA crossover signals per user request
         self.signals: Dict[str, Dict[str, object]] = {
             s: {
                 "funding_trend": FundingTrendSignal(),
@@ -177,7 +178,7 @@ class HybridAlphaEngine:
                 "liquidation_follow": LiquidationFollowSignal(),
                 "range_breakout": RangeBreakoutSignal(),
                 "exhaustion_reversal": ExhaustionReversalSignal(),
-                "sma_crossover": SMACrossover(),  # Best implemented signal per audit
+                # "sma_crossover": SMACrossover(),  # DISABLED per user request
             }
             for s in symbols
         }
@@ -404,7 +405,7 @@ class HybridAlphaEngine:
         signals = []
         
         # Signal categories for regime-based gating
-        TREND_FOLLOWING_SIGNALS = {"funding_trend", "trend_pullback", "sma_crossover"}
+        TREND_FOLLOWING_SIGNALS = {"funding_trend", "trend_pullback"}  # SMA crossover removed
         RANGE_SIGNALS = {"range_breakout"}
         REVERSAL_SIGNALS = {"exhaustion_reversal", "liquidation_follow"}
         

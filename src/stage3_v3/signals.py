@@ -197,6 +197,11 @@ class TrendPullbackSignal:
         self.rsi_range = (35, 65)  # Neutral RSI for optimal entry
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
+        """
+        DISABLED: This signal is disabled and will never return a signal.
+        """
+        return None  # DISABLED - Never return signals
+        
         """Evaluate trend pullback conditions"""
         
         # Need trending regime
@@ -770,15 +775,10 @@ class EMATrendContinuation:
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
         """
-        Entry requires:
-        1. EMA20 > EMA50 (longs) or EMA20 < EMA50 (shorts)
-        2. Price within 0.8% of EMA20 (pullback)
-        3. Structure confirms (HH/HL or LH/LL)
-        4. Not in chop regime
-        5. Passes safety gates
+        DEPRECATED: This signal is disabled and will never return a signal.
+        Use TrendPullbackSignal instead.
         """
-        trend = state.trend
-        symbol = state.symbol
+        return None  # DISABLED - Never return signals
         
         # === HARD VETOES ===
         
@@ -1492,9 +1492,10 @@ class SMACrossover:
     
     def evaluate(self, state: MarketState) -> Optional[HybridSignal]:
         """
-        Entry on SMA10/SMA100 crossover with safety gates.
-        Uses bar_closes_1h from MarketState (populated from bootstrap).
+        DISABLED: This signal is disabled and will never return a signal.
         """
+        return None  # DISABLED - Never return signals
+        
         symbol = state.symbol
         price = state.current_price
         
