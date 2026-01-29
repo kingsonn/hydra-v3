@@ -45,11 +45,11 @@ from src.stage3_v3.signals import (
     CompressedRangeBreakout,
     TrendExhaustionReversal,
     # Entry-first signals (frequency alpha)
-    EMATrendContinuation,
-    ADXExpansionMomentum,
-    StructureBreakRetest,
-    CompressionBreakout,
-    SMACrossover,
+    # EMATrendContinuation,  # DISABLED per user request
+    # ADXExpansionMomentum,
+    # StructureBreakRetest,
+    # CompressionBreakout,
+    # SMACrossover,  # DISABLED per user request
 )
 from src.stage6.position_sizer_v3 import PositionSizerV3, PositionResultV3
 from src.stage7.trade_manager_v3 import TradeManagerV3
@@ -172,7 +172,7 @@ class GlobalPipelineRunnerV3:
         self.bias_calculator = BiasCalculator()
         self.regime_classifier = get_regime_classifier()  # Singleton with persistence
         
-        # Stage 3 V3 signals - All 10 hybrid signals active
+        # Stage 3 V3 signals - Core signals only (EMA continuation and SMA crossover disabled per user request)
         self._signals = {
             # Positional signals (background alpha - 5 signals)
             "FUNDING_PRESSURE": FundingPressureContinuation(),
@@ -180,16 +180,16 @@ class GlobalPipelineRunnerV3:
             "LIQUIDATION_CASCADE": LiquidationCascadeSignal(),
             "RANGE_BREAKOUT": CompressedRangeBreakout(),
             "TREND_EXHAUSTION": TrendExhaustionReversal(),
-            # Entry-first signals (frequency alpha - 5 signals)
-            "EMA_CONTINUATION": EMATrendContinuation(),
-            "ADX_EXPANSION": ADXExpansionMomentum(),
-            "STRUCTURE_BREAK": StructureBreakRetest(),
-            "COMPRESSION_BREAK": CompressionBreakout(),
-            "SMA_CROSSOVER": SMACrossover(),
+            # Entry-first signals DISABLED per user request:
+            # "EMA_CONTINUATION": EMATrendContinuation(),
+            # "ADX_EXPANSION": ADXExpansionMomentum(),
+            # "STRUCTURE_BREAK": StructureBreakRetest(),
+            # "COMPRESSION_BREAK": CompressionBreakout(),
+            # "SMA_CROSSOVER": SMACrossover(),
         }
         
         # Stage 6 V3 position sizer
-        self.position_sizer = PositionSizerV3(risk_pct=0.02)
+        self.position_sizer = PositionSizerV3(risk_pct=0.06)
         
         # Stage 7 V3 trade manager (with WEEX execution if live_trading enabled)
         self.trade_manager = TradeManagerV3(
