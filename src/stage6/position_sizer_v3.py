@@ -21,7 +21,7 @@ logger = structlog.get_logger(__name__)
 
 # Constants
 FEE_PCT = 0.0008              # 0.08% per side (0.16% round-trip)
-RISK_PCT = 0.02               # 2% risk per trade
+RISK_PCT = 0.04               # 4% risk per trade
 LEVERAGE = 20                 # 20x leverage
 MIN_NOTIONAL_USD = 10.0       # Minimum notional
 MAX_NOTIONAL_USD = 50000.0    # Maximum notional per trade
@@ -135,7 +135,7 @@ class PositionSizerV3:
         self.leverage = leverage
         
         # Current equity (updated by trade manager)
-        self._current_equity: float = 1000.0
+        self._current_equity: float = 1200.0
         
         # Active positions per symbol
         self._active_positions: Dict[str, PositionV3] = {}

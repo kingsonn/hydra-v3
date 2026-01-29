@@ -122,7 +122,7 @@ class WeexClient:
         api_key: str = None,
         secret_key: str = None,
         passphrase: str = None,
-        equity: float = 1000.0,
+        equity: float = 1200.0,
         dry_run: bool = False,
     ):
         self.api_key = api_key or settings.WEEX_API_KEY

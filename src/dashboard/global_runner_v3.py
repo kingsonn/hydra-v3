@@ -136,7 +136,7 @@ class GlobalPipelineRunnerV3:
         symbols: Optional[List[str]] = None,
         dashboard_port: int = 8889,  # Different port from old runner
         enable_dashboard: bool = True,
-        initial_equity: float = 1000.0,
+        initial_equity: float = 1200.0,
         live_trading: bool = False,  # Enable real order execution via WEEX
         dry_run: bool = True,  # If live_trading=True, dry_run=True simulates without real orders
     ):
@@ -189,7 +189,7 @@ class GlobalPipelineRunnerV3:
         }
         
         # Stage 6 V3 position sizer
-        self.position_sizer = PositionSizerV3(risk_pct=0.06)
+        self.position_sizer = PositionSizerV3(risk_pct=0.04)
         
         # Stage 7 V3 trade manager (with WEEX execution if live_trading enabled)
         self.trade_manager = TradeManagerV3(
